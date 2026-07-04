@@ -1,0 +1,65 @@
+services:
+  # ── PostgreSQL with pgvector (drop-in replacement for postgres:16) ──
+  # pgvector/pgvector:pg16 is identical to postgres:16-alpine but with
+  # the vector extension pre-installed. Used by Temporal, the agentmesh
+  # database, LangGraph checkpointer, and the pgvector memory store.
+  temporal-postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    ports:
+      - "5434:5432"
+    volumes:
+      - temporal-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Temporal (auto-setup: runs schema migration + starts all services) ──
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      POSTGRES_SEEDS: temporal-postgres
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      DB_PORT: "5432"
+      DBNAME: temporal
+      DB_SHARD_COUNT: 1
+      TEMPORAL_AUTH_ENABLED: "false"
+      LOG_LEVEL: "info"
+    ports:
+      - "7233:7233"  # Frontend gRPC (client + worker connect here)
+
+  # ── Temporal Web UI ──
+  temporal-ui:
+    image: temporalio/ui:2.31.0
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: "http://localhost:8080"
+    ports:
+      - "8080:8080"  # Web UI
+
+  # ── Jaeger (OpenTelemetry tracing backend) ──
+  # Receives traces via OTLP gRPC (4317) and OTLP HTTP (4318).
+  # UI available at http://localhost:16686
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+
+volumes:
+  temporal-pg-data:
