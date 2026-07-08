@@ -17,12 +17,23 @@ from app.agents.sourcing_agent.activity import (
     create_po_activity,
     initiate_payment_activity,
     run_agent_graph,
-    run_graph_until_interrupt,
-    resume_graph,
+    run_graph_until_interrupt as sourcing_run_graph_until_interrupt,
+    resume_graph as sourcing_resume_graph,
     run_research_activity,
     score_suppliers_activity,
 )
 from app.agents.sourcing_agent import TASK_QUEUE as SOURCING_TASK_QUEUE
+
+# Hiring agent — same engine (Temporal + LangGraph + interrupt()), a harder
+# problem: screen -> score -> schedule -> interview -> human review -> offer
+from app.agents.hiring_agent.workflow import HiringWorkflow
+from app.agents.hiring_agent.activity import (
+    run_graph_until_interrupt as hiring_run_graph_until_interrupt,
+    resume_graph as hiring_resume_graph,
+    send_offer_activity,
+)
+from app.agents.hiring_agent import TASK_QUEUE as HIRING_TASK_QUEUE
+from app.agents.hiring_agent.db import init_tables as init_hiring_tables
 
 # Benchmark agent — minimal workflow for load testing
 from app.agents.benchmark_agent.workflow import BenchmarkWorkflow, benchmark_activity
@@ -34,9 +45,11 @@ from app.agents.sourcing_agent.db import init_tables
 
 async def main():
     await init_tables()
+    await init_hiring_tables()
     client = await get_temporal_client()
 
-    # Run both workers concurrently — sourcing and benchmark on separate task queues
+    # Run all workers concurrently — sourcing, hiring, and benchmark each on
+    # their own task queue
     import asyncio
     await asyncio.gather(
         run_worker(
@@ -45,12 +58,22 @@ async def main():
             workflows=[SourcingWorkflow],
             activities=[
                 run_agent_graph,
-                run_graph_until_interrupt,
-                resume_graph,
+                sourcing_run_graph_until_interrupt,
+                sourcing_resume_graph,
                 run_research_activity,
                 create_po_activity,
                 initiate_payment_activity,
                 score_suppliers_activity,
+            ],
+        ),
+        run_worker(
+            client=client,
+            task_queue=HIRING_TASK_QUEUE,
+            workflows=[HiringWorkflow],
+            activities=[
+                hiring_run_graph_until_interrupt,
+                hiring_resume_graph,
+                send_offer_activity,
             ],
         ),
         run_worker(
