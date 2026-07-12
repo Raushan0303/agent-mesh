@@ -16,7 +16,10 @@ Most AI agent demos are a Python script with a prompt and an API key. They work 
 
 AgentMesh solves these with **real infrastructure**: Temporal for durable execution, LangGraph for explicit graph topology, and a custom tool registry with schema validation and sandboxing — the layer that doesn't exist in either Temporal or LangGraph and has to be built from scratch.
 
-The first agent is a **sourcing agent** that queries a mock marketplace for suppliers, gets price quotes, checks ratings, creates purchase orders, and initiates payments — all with human-in-the-loop checkpoints and exactly-once side effects.
+Two agents run on this platform today, sharing the same engine and reliability primitives:
+
+- **Sourcing agent** — queries a mock marketplace for suppliers, gets price quotes, checks ratings, creates purchase orders, and initiates payments, with human-in-the-loop checkpoints and exactly-once side effects.
+- **Hiring agent** — screens a resume against a role's skill rubric, schedules an interview, runs a bounded multi-turn interview, pauses for a recruiter's human review, and sends the offer — a harder, higher-stakes workflow built on the exact same Temporal + LangGraph + MCP Tool Registry foundation. See `app/agents/hiring_agent/`.
 
 ---
 
@@ -86,6 +89,28 @@ curl -X POST http://localhost:8000/workflows \
 curl http://localhost:8000/workflows/<workflow_id>
 ```
 
+### Submit a hiring request
+
+```bash
+curl -X POST http://localhost:8000/workflows \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_type": "hiring_agent",
+    "input": {
+      "candidate_name": "Jane Doe",
+      "role": "Backend Engineer",
+      "resume_text": "Experienced with Python, distributed systems, Postgres, and Kubernetes.",
+      "years_experience": 6,
+      "target_salary": 180000
+    }
+  }'
+
+# Same agent-agnostic approve endpoint the sourcing agent uses
+curl -X POST http://localhost:8000/workflows/<workflow_id>/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approved": true, "comment": "Strong interview, extend offer"}'
+```
+
 ### View in Temporal Web UI
 
 Open http://localhost:8080 — search for your workflow ID to see the full event timeline.
@@ -93,11 +118,14 @@ Open http://localhost:8080 — search for your workflow ID to see the full event
 ### Run tests
 
 ```bash
-# Full suite (39 tests, ~3min)
+# Full suite
 python -m pytest tests/ -v --ignore=tests/agentmesh/test_chaos_idempotency.py
 
-# CI-gated eval suite (50 scenarios)
+# CI-gated eval suite — sourcing agent (50 scenarios)
 PYTHONPATH=. python -m app.agents.sourcing_agent.eval_glue
+
+# CI-gated eval suite — hiring agent (20 scenarios)
+PYTHONPATH=. python -m app.agents.hiring_agent.eval_glue
 
 # Populate memory store (one-time)
 PYTHONPATH=. python scripts/init_memory_store.py
@@ -218,17 +246,29 @@ agent-mesh/
 │   │   └── worker_runner.py               #   Entry point — the ONLY platform file that imports agent code
 │   │
 │   └── agents/                            # ── AGENT IMPLEMENTATIONS ──
-│       └── sourcing_agent/                #   The first (and so far only) agent
+│       ├── sourcing_agent/                #   Agent #1: procurement
+│       │   ├── __init__.py                #     TASK_QUEUE + self-registration into AGENT_REGISTRY + tool registration
+│       │   ├── state.py                   #     Pydantic input/output models + LangGraph state TypedDict
+│       │   ├── mock_marketplace.py        #     8 mock suppliers across 4 item types
+│       │   ├── tool_schemas.py            #     Pydantic input/output models for all 5 tools
+│       │   ├── tools.py                   #     5 tool implementations + register_sourcing_tools()
+│       │   ├── graph.py                   #     LangGraph StateGraph (Research node + retry loop)
+│       │   ├── activity.py                #     4 Temporal Activities (research, score, create_po, payment)
+│       │   ├── workflow.py                #     SourcingWorkflow — calls Activities with per-Activity retry policies
+│       │   ├── db.py                      #     asyncpg pool + idempotency table helpers
+│       │   └── eval_dataset.py            #     50 sourcing scenarios for the eval harness
+│       └── hiring_agent/                  #   Agent #2: recruiting — same engine, harder problem
 │           ├── __init__.py                #     TASK_QUEUE + self-registration into AGENT_REGISTRY + tool registration
 │           ├── state.py                   #     Pydantic input/output models + LangGraph state TypedDict
-│           ├── mock_marketplace.py        #     8 mock suppliers across 4 item types
-│           ├── tool_schemas.py            #     Pydantic input/output models for all 5 tools
-│           ├── tools.py                   #     5 tool implementations + register_sourcing_tools()
-│           ├── graph.py                   #     LangGraph StateGraph (Research node + retry loop)
-│           ├── activity.py                #     4 Temporal Activities (research, score, create_po, payment)
-│           ├── workflow.py                #     SourcingWorkflow — calls Activities with per-Activity retry policies
-│           ├── db.py                      #     asyncpg pool + idempotency table helpers
-│           └── eval_dataset.py            #     20 sourcing scenarios for the eval harness
+│           ├── mock_ats.py                #     Role skill bank + mock calendar/interviewer pool
+│           ├── tool_schemas.py            #     Pydantic input/output models for both tools
+│           ├── tools.py                   #     schedule_interview + send_offer + register_hiring_tools()
+│           ├── graph.py                   #     LangGraph StateGraph: Screen → Score → (Reject|Schedule) →
+│           │                              #     Interview (follow-up loop ≤3) → Human Review → Offer Decision
+│           ├── activity.py                #     3 Temporal Activities (graph until interrupt, resume, send_offer)
+│           ├── workflow.py                #     HiringWorkflow — same "approve" signal contract as SourcingWorkflow
+│           ├── db.py                      #     asyncpg pool + idempotency table for the offer
+│           └── eval_dataset.py            #     20 hiring scenarios for the eval harness
 │
 ├── tests/
 │   ├── agentmesh/                         #   Platform tests
@@ -237,9 +277,12 @@ agent-mesh/
 │   │   ├── test_tool_registry.py          #     9 tests: timeout, schema validation, error wrapping
 │   │   ├── test_chaos_idempotency.py      #     20-trial chaos test: 0 duplicate POs, 0 duplicate payments
 │   │   └── test_workflow_versioning.py    #     Versioning: new workflows use scored path (4 Activities)
-│   └── agents/sourcing_agent/
-│       ├── test_graph.py                  #     Stop condition tests (success + no-match paths)
-│       └── test_tool_selection_eval.py    #     20-scenario eval: 100% tool-selection accuracy
+│   └── agents/
+│       ├── sourcing_agent/
+│       │   ├── test_graph.py              #     Stop condition tests (success + no-match paths)
+│       │   └── test_tool_selection_eval.py #    50-scenario eval: 100% tool-selection accuracy
+│       └── hiring_agent/
+│           └── test_tool_selection_eval.py #    20-scenario eval: 100% tool-selection accuracy
 │
 └── scripts/
     ├── hello_workflow.py                  #   Throwaway smoke test (Phase 0)
@@ -273,7 +316,7 @@ grep -r "sourcing\|supplier\|purchase" app/agentmesh/temporal/         → ZERO 
 grep -r "sourcing\|supplier\|purchase" app/core/constants.py           → ZERO results ✅
 ```
 
-Adding a second agent touches **zero files** in `app/agentmesh/`. You create `app/agents/new_agent/`, add one import line in `main.py`, and the gateway, worker, tool registry, and eval harness all work without modification.
+Adding a second agent touches **zero files** in `app/agentmesh/`. You create `app/agents/new_agent/`, add one import line in `main.py`, and the gateway, tool registry, and eval harness all work without modification. This isn't a hypothetical: `app/agents/hiring_agent/` was added this way — same `AGENT_REGISTRY` self-registration, same shared Tool Registry, same generic `/approve` signal contract, same `EvalHarness`. The only platform-adjacent file it touches is `worker_runner.py`, because Temporal workers must be told which task queues to poll — that's inherent to how Temporal workers work, not a gateway/tool-registry/eval-harness change.
 
 ---
 
