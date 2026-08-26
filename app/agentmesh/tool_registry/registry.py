@@ -1,7 +1,9 @@
 import logging
 from collections.abc import Awaitable, Callable
 
+from app.agentmesh.tool_registry.egress import EgressFilter, SandboxedHTTPClient
 from app.agentmesh.tool_registry.exceptions import ToolNotFoundError
+from app.agentmesh.tool_registry.output_cap import enforce_output_cap
 from app.agentmesh.tool_registry.sandbox import run_with_timeout
 from app.agentmesh.tool_registry.schema_validation import validate_input, validate_output
 from app.agentmesh.tool_registry.spec import ToolSpec
@@ -15,8 +17,10 @@ class ToolRegistry:
     Any agent's LangGraph nodes call through this registry to invoke tools.
     The registry handles:
     1. Input schema validation (before execution)
-    2. Timeout enforcement (during execution)
-    3. Output schema validation (after execution)
+    2. Egress filtering (creates SandboxedHTTPClient per tool)
+    3. Timeout enforcement (during execution)
+    4. Output size capping (after execution, before validation)
+    5. Output schema validation (after execution)
 
     The registry contains ZERO agent-specific code. Tools register themselves;
     the registry just enforces the contract.
@@ -33,10 +37,11 @@ class ToolRegistry:
         if spec.name in self._tools:
             raise ValueError(f"Tool already registered: {spec.name}")
         logger.info(
-            "TOOL_REGISTERED name=%s timeout=%ss idempotency=%s",
+            "TOOL_REGISTERED name=%s timeout=%ss idempotency=%s egress=%s",
             spec.name,
             spec.timeout_seconds,
             spec.idempotency_required,
+            len(spec.allowed_egress),
         )
         self._tools[spec.name] = (spec, fn)
 
@@ -56,6 +61,7 @@ class ToolRegistry:
         Raises SchemaValidationError if input or output fails validation.
         Raises ToolTimeoutError if the tool exceeds its timeout.
         Raises ToolExecutionError if the tool raises an exception.
+        Raises EgressDeniedError if the tool attempts an unauthorized outbound call.
         """
         entry = self._tools.get(name)
         if not entry:
@@ -67,14 +73,26 @@ class ToolRegistry:
         validated_input = validate_input(spec.input_model, args)
         logger.info("TOOL_CALL name=%s args_validated=true", name)
 
-        # Step 2: Execute with timeout enforcement
+        # Step 2: Create SandboxedHTTPClient if the tool has an egress allowlist
+        egress_filter = EgressFilter(spec.allowed_egress) if spec.allowed_egress else None
+
+        # Step 3: Execute with timeout enforcement
+        # If the tool has an egress allowlist, pass the SandboxedHTTPClient
+        # as a keyword argument so the tool can use it for outbound calls.
+        call_kwargs = validated_input.model_dump()
+        if egress_filter is not None:
+            call_kwargs["http_client"] = SandboxedHTTPClient(egress_filter)
+
         result = await run_with_timeout(
             fn,
-            validated_input.model_dump(),
+            call_kwargs,
             spec.timeout_seconds,
         )
 
-        # Step 3: Validate output against the registered Pydantic model
+        # Step 4: Enforce output size cap (before validation)
+        result = enforce_output_cap(result, spec.max_output_bytes)
+
+        # Step 5: Validate output against the registered Pydantic model
         validated_output = validate_output(spec.output_model, result)
         logger.info(
             "TOOL_CALL_COMPLETE name=%s output_validated=true",

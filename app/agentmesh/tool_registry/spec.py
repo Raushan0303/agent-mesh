@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
@@ -17,3 +17,5 @@ class ToolSpec:
     output_model: type[BaseModel]
     timeout_seconds: float
     idempotency_required: bool
+    allowed_egress: list[str] = field(default_factory=list)
+    max_output_bytes: int = 65536

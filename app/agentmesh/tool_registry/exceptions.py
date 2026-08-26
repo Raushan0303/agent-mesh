@@ -16,3 +16,7 @@ class ToolTimeoutError(ToolRegistryError):
 
 class ToolExecutionError(ToolRegistryError):
     """Raised when a tool raises an exception during execution."""
+
+
+class EgressDeniedError(ToolRegistryError):
+    """Raised when an outbound request is blocked by the egress filter."""
