@@ -61,5 +61,10 @@ services:
       - "4317:4317"    # OTLP gRPC
       - "4318:4318"    # OTLP HTTP
 
+# Note: Redis is NOT duplicated here — it's already running in the
+# InferRoute docker-compose on port 6379. AgentMesh connects to it
+# via settings.redis_url (default: redis://localhost:6379).
+# Start InferRoute's stack first: cd ../infer-route && docker compose up -d
+
 volumes:
   temporal-pg-data:

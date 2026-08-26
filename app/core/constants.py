@@ -61,3 +61,15 @@ GRAPH_SCHEDULE_TO_CLOSE = timedelta(seconds=180)
 # Default (used by legacy Activities)
 DEFAULT_SCHEDULE_TO_START = timedelta(seconds=10)
 DEFAULT_SCHEDULE_TO_CLOSE = timedelta(seconds=120)
+
+# ── Week 12-13: SSE + Webhook constants ──
+
+# SSE channel naming: workflow:{workflow_id}:events
+SSE_CHANNEL_PREFIX = "workflow"
+SSE_HISTORY_SUFFIX = "events:history"  # appended to channel name for history list
+
+# Webhook headers
+WEBHOOK_SIGNATURE_HEADER = "X-AgentMesh-Signature"
+WEBHOOK_EVENT_HEADER = "X-AgentMesh-Event"
+WEBHOOK_WORKFLOW_ID_HEADER = "X-AgentMesh-Workflow-Id"
+WEBHOOK_DELIVERY_ID_HEADER = "X-AgentMesh-Delivery-Id"

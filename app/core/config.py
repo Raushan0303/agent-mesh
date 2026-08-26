@@ -60,5 +60,22 @@ class Settings(BaseSettings):
     llm_base_url: str = ""  # empty = use provider preset; set for "custom"
     llm_api_key: str = ""  # empty = read from env var (OPENROUTER_API_KEY, GROQ_API_KEY, etc.)
 
+    # ── Week 12-13: Delivery + Sandbox + Cost + Verification ──
+
+    # Redis (SSE event bus + event history for reconnection)
+    redis_url: str = "redis://localhost:6379"
+
+    # SSE streaming
+    sse_buffer_size: int = 100  # max events buffered before closing slow client
+    sse_history_ttl_seconds: int = 3600  # 1 hour — how long event history is kept for reconnection
+
+    # Cost ceilings
+    default_cost_budget_usd: float = 0.50  # default per-workflow budget
+
+    # Webhook delivery
+    webhook_timeout_seconds: float = 10.0
+    webhook_retry_attempts: int = 3
+    webhook_hmac_secret: str = ""  # empty = generate per-request (returns in start response)
+
 
 settings = Settings()
