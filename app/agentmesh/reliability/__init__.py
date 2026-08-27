@@ -20,6 +20,7 @@ from app.agentmesh.reliability.bulkhead import (
     get_bulkhead,
     reset_all_bulkheads,
 )
+from app.agentmesh.reliability.cost_tracker import CostTracker
 
 __all__ = [
     "CircuitBreaker",
@@ -33,4 +34,5 @@ __all__ = [
     "get_bulkhead",
     "reset_all_bulkheads",
     "get_all_bulkhead_states",
+    "CostTracker",
 ]
