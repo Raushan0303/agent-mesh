@@ -44,6 +44,7 @@ class LLMResponse:
     content: str
     model: str = ""
     usage: dict = field(default_factory=dict)  # {prompt_tokens, completion_tokens, total_tokens}
+    cost_usd: float = 0.0  # from InferRoute's response (computed by InferRoute, not AgentMesh)
     raw: Any = None  # raw provider response for debugging
 
 
@@ -241,17 +242,26 @@ class OpenAICompatibleClient(LLMClient):
                 "total_tokens": response.usage.total_tokens,
             }
 
+        # Parse cost_usd from the response (InferRoute adds this; other providers don't)
+        # The openai SDK stores extra fields in the model_extra dict
+        cost_usd = 0.0
+        raw_dict = response.model_dump() if hasattr(response, "model_dump") else {}
+        if isinstance(raw_dict, dict):
+            cost_usd = float(raw_dict.get("cost_usd", 0.0) or 0.0)
+
         logger.info(
-            "LLM_RESPONSE model=%s content_len=%d tokens=%s",
+            "LLM_RESPONSE model=%s content_len=%d tokens=%s cost_usd=%.6f",
             used_model,
             len(content),
             usage.get("total_tokens", "?"),
+            cost_usd,
         )
 
         return LLMResponse(
             content=content,
             model=used_model,
             usage=usage,
+            cost_usd=cost_usd,
             raw=response,
         )
 

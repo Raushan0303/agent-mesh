@@ -301,11 +301,18 @@ async def decide_node(state: AgentState) -> dict:
         )
         selected, rationale = _parse_llm_decision(response.content, scored)
         logger.info(
-            "DECIDE_LLM_COMPLETED selected=%s model=%s tokens=%s",
+            "DECIDE_LLM_COMPLETED selected=%s model=%s tokens=%s cost_usd=%.6f",
             selected["name"],
             response.model,
             response.usage.get("total_tokens", "?"),
+            response.cost_usd,
         )
+        return {
+            "selected_supplier": selected,
+            "decision_reason": rationale,
+            "past_decisions": past_decisions,
+            "cost_incurred": response.cost_usd,
+        }
     except Exception as e:
         logger.warning("DECIDE_LLM_FAILED error=%s — falling back to scored[0]", e)
         selected = scored[0]
@@ -324,6 +331,7 @@ async def decide_node(state: AgentState) -> dict:
         "selected_supplier": selected,
         "decision_reason": rationale,
         "past_decisions": past_decisions,
+        "cost_incurred": 0.0,
     }
 
 

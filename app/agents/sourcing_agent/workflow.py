@@ -32,6 +32,10 @@ with workflow.unsafe.imports_passed_through():
         run_research_activity,
         score_suppliers_activity,
     )
+    from app.agents.sourcing_agent.verification import (
+        verify_po_exists,
+        verify_payment_initiated,
+    )
     from app.agents.sourcing_agent.state import (
         SourcingBriefInput,
         SourcingResult,
@@ -64,6 +68,14 @@ class SourcingWorkflow:
     @workflow.run
     async def run(self, brief: SourcingBriefInput) -> SourcingResult:
         """Run the 5-node graph with human approval checkpoint."""
+        # Resolve cost budget (0 = use default from settings)
+        cost_budget = brief.cost_budget_usd
+        if cost_budget <= 0:
+            from app.core.config import settings
+            cost_budget = settings.default_cost_budget_usd
+
+        total_cost = 0.0
+
         # Activity 1: Run the graph until interrupt() or completion
         # Graph activities get longer timeouts (the graph runs multiple tools)
         graph_result = await workflow.execute_activity(
@@ -75,12 +87,30 @@ class SourcingWorkflow:
             retry_policy=AGGRESSIVE_RETRY_TEMPLATE,
         )
 
+        total_cost += graph_result.get("cost_incurred", 0.0)
+
+        # Cost check after graph activity
+        if total_cost > cost_budget:
+            workflow.logger.warning(
+                "COST_BUDGET_EXCEEDED spent=%.4f budget=%.4f (after graph)",
+                total_cost, cost_budget,
+            )
+            return SourcingResult(
+                suppliers=graph_result.get("suppliers", []),
+                status="cost_exceeded",
+                attempts=graph_result.get("attempts", 0),
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
+            )
+
         # If the graph completed without pausing (no_matches), return early
         if not graph_result.get("paused", False):
             return SourcingResult(
                 suppliers=graph_result.get("suppliers", []),
                 status=graph_result.get("status", "failed"),
                 attempts=graph_result.get("attempts", 0),
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
             )
 
         # The graph paused at Approve — wait for human signal
@@ -106,6 +136,8 @@ class SourcingWorkflow:
                 attempts=graph_result.get("attempts", 0),
                 selected_supplier=selected.get("name") if selected else None,
                 approval_status="timeout",
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
             )
 
         # Activity 2: Resume the graph with the approval data
@@ -118,6 +150,23 @@ class SourcingWorkflow:
             retry_policy=AGGRESSIVE_RETRY_TEMPLATE,
         )
 
+        total_cost += resume_result.get("cost_incurred", 0.0)
+
+        # Cost check after resume
+        if total_cost > cost_budget:
+            workflow.logger.warning(
+                "COST_BUDGET_EXCEEDED spent=%.4f budget=%.4f (after resume)",
+                total_cost, cost_budget,
+            )
+            return SourcingResult(
+                suppliers=graph_result.get("suppliers", []),
+                status="cost_exceeded",
+                attempts=graph_result.get("attempts", 0),
+                selected_supplier=selected.get("name") if selected else None,
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
+            )
+
         final_status = resume_result.get("status", "completed")
         approval_status = resume_result.get("approval_status", "approved")
 
@@ -129,6 +178,8 @@ class SourcingWorkflow:
                 attempts=graph_result.get("attempts", 0),
                 selected_supplier=selected.get("name") if selected else None,
                 approval_status="rejected",
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
             )
 
         # Approved — create PO and initiate payment
@@ -144,6 +195,32 @@ class SourcingWorkflow:
             retry_policy=STRICT_NON_RETRYABLE_TEMPLATE,
         )
 
+        # Verify the PO was actually created (never trust the activity's self-report)
+        po_verification = await workflow.execute_activity(
+            verify_po_exists,
+            args=(po_result["po_id"],),
+            start_to_close_timeout=READ_ONLY_START_TO_CLOSE,
+            schedule_to_start_timeout=READ_ONLY_SCHEDULE_TO_START,
+            schedule_to_close_timeout=READ_ONLY_SCHEDULE_TO_CLOSE,
+            retry_policy=AGGRESSIVE_RETRY_TEMPLATE,
+        )
+
+        if not po_verification.get("verified", False):
+            workflow.logger.error(
+                "PO_VERIFICATION_FAILED po_id=%s — not found in database",
+                po_result["po_id"],
+            )
+            return SourcingResult(
+                suppliers=graph_result.get("suppliers", []),
+                status="verification_failed",
+                attempts=graph_result.get("attempts", 0),
+                selected_supplier=selected.get("name") if selected else None,
+                approval_status="approved",
+                verification_error=f"PO {po_result['po_id']} not found after creation",
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
+            )
+
         total_amount = unit_price * brief.quantity
         payment_result = await workflow.execute_activity(
             initiate_payment_activity,
@@ -154,6 +231,33 @@ class SourcingWorkflow:
             retry_policy=STRICT_NON_RETRYABLE_TEMPLATE,
         )
 
+        # Verify the payment was actually initiated
+        payment_verification = await workflow.execute_activity(
+            verify_payment_initiated,
+            args=(payment_result["payment_id"],),
+            start_to_close_timeout=READ_ONLY_START_TO_CLOSE,
+            schedule_to_start_timeout=READ_ONLY_SCHEDULE_TO_START,
+            schedule_to_close_timeout=READ_ONLY_SCHEDULE_TO_CLOSE,
+            retry_policy=AGGRESSIVE_RETRY_TEMPLATE,
+        )
+
+        if not payment_verification.get("verified", False):
+            workflow.logger.error(
+                "PAYMENT_VERIFICATION_FAILED payment_id=%s — not found in database",
+                payment_result["payment_id"],
+            )
+            return SourcingResult(
+                suppliers=graph_result.get("suppliers", []),
+                status="verification_failed",
+                attempts=graph_result.get("attempts", 0),
+                po_id=po_result["po_id"],
+                selected_supplier=selected.get("name") if selected else None,
+                approval_status="approved",
+                verification_error=f"Payment {payment_result['payment_id']} not confirmed",
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
+            )
+
         return SourcingResult(
             suppliers=graph_result.get("suppliers", []),
             status="completed",
@@ -162,6 +266,8 @@ class SourcingWorkflow:
             payment_id=payment_result["payment_id"],
             selected_supplier=selected.get("name") if selected else None,
             approval_status="approved",
+            cost_incurred=total_cost,
+            cost_budget=cost_budget,
         )
 
     # ── Signal handler ──

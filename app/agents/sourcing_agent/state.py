@@ -10,18 +10,22 @@ class SourcingBriefInput(BaseModel):
     quantity: int
     budget: float
     deadline: str | None = None
+    cost_budget_usd: float = 0.0  # per-workflow cost budget; 0 = use default
 
 
 class SourcingResult(BaseModel):
     """Output schema — returned by the Workflow."""
 
     suppliers: list[dict]
-    status: str  # "completed" | "failed" | "no_matches" | "rejected"
+    status: str  # "completed" | "failed" | "no_matches" | "rejected" | "cost_exceeded" | "verification_failed"
     attempts: int
     po_id: str | None = None
     payment_id: str | None = None
     selected_supplier: str | None = None
     approval_status: str | None = None  # "approved" | "rejected" | None
+    cost_incurred: float = 0.0
+    cost_budget: float = 0.0
+    verification_error: str = ""
 
 
 class ResearchResult(BaseModel):
@@ -86,3 +90,6 @@ class AgentState(TypedDict, total=False):
     po_id: str
     payment_id: str
     final_status: str  # "completed" | "rejected"
+
+    # Cost tracking (Week 12-13)
+    cost_incurred: float  # accumulated LLM cost within this graph run

@@ -108,6 +108,7 @@ async def run_graph_until_interrupt(brief: SourcingBriefInput) -> dict:
             "status": "no_matches",
             "attempts": final_state.get("attempts", 0),
             "selected_supplier": None,
+            "cost_incurred": final_state.get("cost_incurred", 0.0),
         }
 
     # If the graph completed (e.g., auto-approved or rejected), return final
@@ -119,6 +120,7 @@ async def run_graph_until_interrupt(brief: SourcingBriefInput) -> dict:
             "status": final_status,
             "attempts": final_state.get("attempts", 0),
             "selected_supplier": final_state.get("selected_supplier", {}),
+            "cost_incurred": final_state.get("cost_incurred", 0.0),
         }
 
     # The graph paused at Approve — the approval_status is empty (not yet set)
@@ -151,6 +153,7 @@ async def run_graph_until_interrupt(brief: SourcingBriefInput) -> dict:
         "status": "paused",
         "attempts": final_state.get("attempts", 0),
         "selected_supplier": selected,
+        "cost_incurred": final_state.get("cost_incurred", 0.0),
     }
 
 
@@ -206,6 +209,7 @@ async def resume_graph(approval_data: dict) -> dict:
         "status": final_status,
         "selected_supplier": selected,
         "approval_status": approval_status,
+        "cost_incurred": final_state.get("cost_incurred", 0.0),
     }
 
 
