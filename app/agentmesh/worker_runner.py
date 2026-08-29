@@ -22,6 +22,10 @@ from app.agents.sourcing_agent.activity import (
     run_research_activity,
     score_suppliers_activity,
 )
+from app.agents.sourcing_agent.verification import (
+    verify_po_exists,
+    verify_payment_initiated,
+)
 from app.agents.sourcing_agent import TASK_QUEUE as SOURCING_TASK_QUEUE
 
 # Hiring agent — same engine (Temporal + LangGraph + interrupt()), a harder
@@ -64,6 +68,8 @@ async def main():
                 create_po_activity,
                 initiate_payment_activity,
                 score_suppliers_activity,
+                verify_po_exists,
+                verify_payment_initiated,
             ],
         ),
         run_worker(
