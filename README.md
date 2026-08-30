@@ -2,7 +2,15 @@
 
 **A durable agent execution platform that combines Temporal (crash-safe workflows) with LangGraph (agent reasoning graphs) and a custom MCP tool-calling framework — built to prove that production AI agents need real infrastructure, not just prompt engineering.**
 
-> Status: Weeks 1-6 complete. The platform runs end-to-end with a 5-node LangGraph sourcing agent, pgvector-backed RAG memory, hybrid retrieval (BM25 + dense + RRF + reranker), semantic cache, OpenTelemetry tracing to Jaeger, CI-gated eval harness (50-scenario golden set, LLM-as-judge), feedback loop with drift detection, circuit breakers, bulkheads, per-Activity timeouts, and 39 passing tests. The whole system is live, documented, and CI-gated.
+[Live Architecture Walkthrough →](https://uiagent-sigma.vercel.app/architecture) · [InferRoute (sister project)](https://github.com/Raushan0303/infer-route)
+
+> Status: Weeks 1-13 complete. The platform runs end-to-end with a 5-node LangGraph sourcing agent, pgvector-backed RAG memory, hybrid retrieval (BM25 + dense + RRF + reranker), semantic cache, OpenTelemetry tracing to Jaeger, CI-gated eval harness (50-scenario golden set, LLM-as-judge), feedback loop with drift detection, circuit breakers, bulkheads, per-Activity timeouts, per-workflow cost ceilings, tool sandbox (egress filtering + output caps), and external outcome verification — 80+ passing tests. The whole system is live, documented, and CI-gated.
+
+### Three design decisions worth knowing before reading the code
+
+1. **The tool registry is the non-determinism boundary, not LangGraph.** LangGraph nodes never call a tool directly — every call goes through a Pydantic-validated, timeout-enforced, circuit-breaker-protected registry. This is the layer that doesn't exist in either Temporal or LangGraph and had to be built from scratch.
+2. **The agent's self-report is not the success signal.** After every side-effecting activity (create PO, initiate payment), a separate verification activity queries the database directly. If the PO the agent claims to have created isn't there, the workflow fails — regardless of what the activity returned.
+3. **Cost ceilings live in the workflow, not the LLM call.** InferRoute computes `cost_usd` per call (it owns pricing); AgentMesh accumulates it across activities and checks it against a budget between steps — so a runaway retry loop stops before it becomes a four-figure bill, not after.
 
 ---
 
