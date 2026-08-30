@@ -19,7 +19,6 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -45,7 +44,7 @@ class LLMResponse:
     model: str = ""
     usage: dict = field(default_factory=dict)  # {prompt_tokens, completion_tokens, total_tokens}
     cost_usd: float = 0.0  # from InferRoute's response (computed by InferRoute, not AgentMesh)
-    raw: Any = None  # raw provider response for debugging
+    raw: dict | None = None  # raw provider response for debugging
 
 
 # ── Provider presets ──

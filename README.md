@@ -2,6 +2,13 @@
 
 **A durable agent execution platform that combines Temporal (crash-safe workflows) with LangGraph (agent reasoning graphs) and a custom MCP tool-calling framework — built to prove that production AI agents need real infrastructure, not just prompt engineering.**
 
+![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
+![Temporal](https://img.shields.io/badge/Temporal-1.24-purple.svg)
+![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-green.svg)
+![Tests](https://img.shields.io/badge/tests-80%2B-brightgreen.svg)
+![Evals](https://img.shields.io/badge/evals-50%20scenarios-brightgreen.svg)
+![License](https://img.shields.io/badge/license-portfolio-lightgrey.svg)
+
 [Live Architecture Walkthrough →](https://uiagent-sigma.vercel.app/architecture) · [InferRoute (sister project)](https://github.com/Raushan0303/infer-route)
 
 > Status: Weeks 1-13 complete. The platform runs end-to-end with a 5-node LangGraph sourcing agent, pgvector-backed RAG memory, hybrid retrieval (BM25 + dense + RRF + reranker), semantic cache, OpenTelemetry tracing to Jaeger, CI-gated eval harness (50-scenario golden set, LLM-as-judge), feedback loop with drift detection, circuit breakers, bulkheads, per-Activity timeouts, per-workflow cost ceilings, tool sandbox (egress filtering + output caps), and external outcome verification — 80+ passing tests. The whole system is live, documented, and CI-gated.
@@ -52,11 +59,24 @@ Two agents run on this platform today, sharing the same engine and reliability p
 
 ### Prerequisites
 
-- Docker (for Temporal + Postgres)
+- Docker (for Temporal + Postgres + Jaeger)
 - Python 3.11+
 - `pip install -r requirements.txt`
 
-### Start the stack (3 terminals)
+### One-command setup (using Makefile)
+
+```bash
+# Terminal 1: infrastructure
+make infra && make init-db
+
+# Terminal 2: worker
+make worker
+
+# Terminal 3: gateway
+make gateway
+```
+
+### Manual setup (3 terminals)
 
 ```bash
 # Terminal 1: infrastructure
@@ -127,21 +147,24 @@ Open http://localhost:8080 — search for your workflow ID to see the full event
 
 ```bash
 # Full suite
-python -m pytest tests/ -v --ignore=tests/agentmesh/test_chaos_idempotency.py
+make test
+# or: python -m pytest tests/ -v --ignore=tests/agentmesh/test_chaos_idempotency.py
 
 # CI-gated eval suite — sourcing agent (50 scenarios)
-PYTHONPATH=. python -m app.agents.sourcing_agent.eval_glue
+make eval
+# or: PYTHONPATH=. python -m app.agents.sourcing_agent.eval_glue
 
 # CI-gated eval suite — hiring agent (20 scenarios)
-PYTHONPATH=. python -m app.agents.hiring_agent.eval_glue
+make eval-hiring
+# or: PYTHONPATH=. python -m app.agents.hiring_agent.eval_glue
 
-# Populate memory store (one-time)
-PYTHONPATH=. python scripts/init_memory_store.py
+# Chaos idempotency test (requires running stack)
+make test-chaos
 
 # Locust load test (500 concurrent users)
-locust -f tests/agentmesh/locustfile.py --headless \
-    --users 500 --spawn-rate 10 --run-time 60s \
-    --host http://localhost:8000
+make load
+# or: locust -f tests/agentmesh/locustfile.py --headless \
+#     --users 500 --spawn-rate 10 --run-time 60s --host http://localhost:8000
 ```
 
 ### View traces in Jaeger
@@ -197,6 +220,77 @@ Worker Process ──────────────────── app/
           │ Wraps all errors in structured exceptions
           └── ZERO knowledge of what any tool actually does
 ```
+
+<details>
+<summary><b>Architecture diagram (Mermaid — rendered on GitHub)</b></summary>
+
+```mermaid
+graph TB
+    Client["Client<br/>POST /workflows"]
+
+    subgraph Gateway["FastAPI Gateway"]
+        Routes["routes.py<br/>agent-agnostic routing"]
+        Registry["AGENT_REGISTRY<br/>in-memory dict"]
+        Routes --> Registry
+    end
+
+    subgraph Temporal["Temporal Server (self-hosted)"]
+        History["Event History<br/>(Postgres)"]
+        Queue["Task Queue"]
+    end
+
+    subgraph Worker["Worker Process"]
+        Workflow["SourcingWorkflow.run()<br/>orchestrates Activities"]
+        Act1["Activity 1: run_research<br/>→ LangGraph StateGraph"]
+        Act2["Activity 2: score_suppliers"]
+        Act3["Activity 3: create_po<br/>(idempotent)"]
+        Act4["Activity 4: initiate_payment<br/>(idempotent)"]
+        Workflow --> Act1
+        Workflow --> Act2
+        Workflow --> Act3
+        Workflow --> Act4
+    end
+
+    subgraph ToolRegistry["Tool Registry (novel layer)"]
+        Spec["ToolSpec<br/>name + schemas + timeout"]
+        Sandbox["Sandbox<br/>timeout + egress + output cap"]
+        Validate["Schema Validation<br/>Pydantic v2 in/out"]
+    end
+
+    subgraph Reliability["Reliability"]
+        CB["Circuit Breakers<br/>per-tool"]
+        Bulk["Bulkheads<br/>concurrent call limits"]
+    end
+
+    subgraph Eval["Eval Harness (CI-gated)"]
+        Golden["50-scenario golden set"]
+        Judge["LLM-as-judge"]
+    end
+
+    subgraph Memory["Memory"]
+        RAG["pgvector RAG<br/>BM25 + dense + RRF + reranker"]
+        SemCache["Semantic Cache"]
+    end
+
+    subgraph Obs["Observability"]
+        OTel["OpenTelemetry"]
+        Jaeger["Jaeger UI<br/>:16686"]
+        OTel --> Jaeger
+    end
+
+    Client --> Routes
+    Routes -->|"start_workflow()"| Temporal
+    Temporal -->|"poll tasks"| Worker
+    Act1 -->|"registry.call()"| ToolRegistry
+    Act3 -->|"registry.call()"| ToolRegistry
+    Act4 -->|"registry.call()"| ToolRegistry
+    ToolRegistry --> Reliability
+    Act1 --> Memory
+    Eval -.->|"CI gate"| Worker
+    Worker --> OTel
+```
+
+</details>
 
 ### The five layers
 

@@ -22,7 +22,6 @@ from datetime import timedelta
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
-    from app.agentmesh.temporal.versioning import is_patched
     from app.agents.sourcing_agent.activity import (
         create_po_activity,
         initiate_payment_activity,
@@ -42,7 +41,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.core.constants import (
         AGGRESSIVE_RETRY_TEMPLATE,
-        DEFAULT_ACTIVITY_TIMEOUT,
         GRAPH_SCHEDULE_TO_CLOSE,
         GRAPH_SCHEDULE_TO_START,
         GRAPH_START_TO_CLOSE,
@@ -53,7 +51,6 @@ with workflow.unsafe.imports_passed_through():
         SIDE_EFFECT_SCHEDULE_TO_START,
         SIDE_EFFECT_START_TO_CLOSE,
         STRICT_NON_RETRYABLE_TEMPLATE,
-        STRICT_RETRY_TEMPLATE,
     )
 
 

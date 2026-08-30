@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agentmesh.gateway.routes import router as gateway_router
+from app.agentmesh.gateway.trace_routes import router as trace_router
+from app.agentmesh.gateway.benchmark_routes import router as benchmark_router
 from app.agentmesh.gateway.rag_routes import router as rag_router
 from app.agentmesh.observability.tracing import setup_tracing
 import app.agents.sourcing_agent  # noqa: F401 — triggers self-registration into AGENT_REGISTRY
@@ -26,6 +28,8 @@ app.add_middleware(
 )
 
 app.include_router(gateway_router)
+app.include_router(trace_router)
+app.include_router(benchmark_router)
 app.include_router(rag_router)
 
 
