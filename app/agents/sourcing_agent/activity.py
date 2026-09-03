@@ -15,7 +15,6 @@ and the resume Activity picks it up.
 """
 
 import logging
-from typing import Any
 
 from temporalio import activity
 
