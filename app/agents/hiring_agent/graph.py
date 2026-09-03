@@ -45,12 +45,19 @@ SCORE_THRESHOLD = 55.0
 MAX_FOLLOWUPS = 3
 MAX_REJECTIONS = 3
 
+# Prompt version tags — bump when you change the corresponding prompt.
+# Old runs keep their version in the LangGraph checkpoint. New runs get the new one.
+SCREEN_PROMPT_VERSION = "v1"
+INTERVIEW_PROMPT_VERSION = "v1"
+OFFER_PROMPT_VERSION = "v1"
+
 
 # ── Node 1: Screen Resume (agentic) ──
 
 
-def _build_screen_prompt(role: str, resume_text: str, feedback: str) -> list:
+def _build_screen_prompt(role: str, resume_text: str, feedback: str):
     from app.agentmesh.llm import LLMMessage
+    from app.agentmesh.prompt_versioning import version_prompt
 
     skills = skill_bank_for_role(role)
     system = (
@@ -69,7 +76,10 @@ def _build_screen_prompt(role: str, resume_text: str, feedback: str) -> list:
         f"{feedback_text}\n\n"
         f"Extract matched skills and summarize fit."
     )
-    return [LLMMessage(role="system", content=system), LLMMessage(role="user", content=user)]
+    return version_prompt(
+        [LLMMessage(role="system", content=system), LLMMessage(role="user", content=user)],
+        version=SCREEN_PROMPT_VERSION,
+    )
 
 
 def _parse_screen_response(content: str, role: str, resume_text: str) -> tuple[list[str], str]:
@@ -107,12 +117,12 @@ async def screen_resume_node(state: AgentState) -> dict:
     brief = state["brief"]
     feedback = state.get("screening_feedback", "")
 
-    messages = _build_screen_prompt(brief.role, brief.resume_text, feedback)
+    prompt = _build_screen_prompt(brief.role, brief.resume_text, feedback)
 
     try:
         from app.agentmesh.llm import get_llm_client
         client = get_llm_client()
-        response = await client.complete(messages, temperature=0.0, max_tokens=400)
+        response = await client.complete(prompt.messages, temperature=0.0, max_tokens=400)
         matched, summary = _parse_screen_response(response.content, brief.role, brief.resume_text)
     except Exception as e:
         logger.warning("SCREEN_LLM_FAILED error=%s — falling back to keyword match", e)
@@ -120,12 +130,19 @@ async def screen_resume_node(state: AgentState) -> dict:
         summary = f"Keyword match found {len(matched)} of the role's key skills in the resume."
 
     logger.info(
-        "SCREEN_COMPLETED candidate=%s role=%s matched_skills=%d",
+        "SCREEN_COMPLETED candidate=%s role=%s matched_skills=%d prompt_hash=%s prompt_version=%s",
         brief.candidate_name,
         brief.role,
         len(matched),
+        prompt.hash,
+        prompt.version,
     )
-    return {"skills_matched": matched, "screening_notes": summary}
+    return {
+        "skills_matched": matched,
+        "screening_notes": summary,
+        "screen_prompt_hash": prompt.hash,
+        "screen_prompt_version": prompt.version,
+    }
 
 
 # ── Node 2: Score Rubric (deterministic function — NO LLM) ──
@@ -188,8 +205,9 @@ async def schedule_interview_node(state: AgentState) -> dict:
 # ── Node 4: Interview (agentic, bounded follow-up loop) ──
 
 
-def _build_interview_prompt(brief, matched_skills: list[str], followup_count: int, transcript: list[dict]) -> list:
+def _build_interview_prompt(brief, matched_skills: list[str], followup_count: int, transcript: list[dict]):
     from app.agentmesh.llm import LLMMessage
+    from app.agentmesh.prompt_versioning import version_prompt
 
     system = (
         "You are conducting a technical interview. You are given the candidate's "
@@ -208,7 +226,10 @@ def _build_interview_prompt(brief, matched_skills: list[str], followup_count: in
         f"Turns so far ({followup_count}):\n{history}\n\n"
         f"Continue the interview."
     )
-    return [LLMMessage(role="system", content=system), LLMMessage(role="user", content=user)]
+    return version_prompt(
+        [LLMMessage(role="system", content=system), LLMMessage(role="user", content=user)],
+        version=INTERVIEW_PROMPT_VERSION,
+    )
 
 
 def _parse_interview_response(content: str, followup_count: int, matched_skills: list[str]) -> tuple[bool, float, str]:
@@ -252,12 +273,12 @@ async def interview_node(state: AgentState) -> dict:
     matched = state.get("skills_matched", [])
     transcript = state.get("interview_transcript", [])
 
-    messages = _build_interview_prompt(brief, matched, followup_count, transcript)
+    prompt = _build_interview_prompt(brief, matched, followup_count, transcript)
 
     try:
         from app.agentmesh.llm import get_llm_client
         client = get_llm_client()
-        response = await client.complete(messages, temperature=0.3, max_tokens=300)
+        response = await client.complete(prompt.messages, temperature=0.3, max_tokens=300)
         needs_followup, score_delta, note = _parse_interview_response(response.content, followup_count, matched)
     except Exception as e:
         logger.warning("INTERVIEW_LLM_FAILED error=%s — using deterministic turn", e)
@@ -271,17 +292,21 @@ async def interview_node(state: AgentState) -> dict:
     done = (not needs_followup) or new_followup_count >= MAX_FOLLOWUPS
 
     logger.info(
-        "INTERVIEW_TURN candidate=%s turn=%d score=%.1f done=%s",
+        "INTERVIEW_TURN candidate=%s turn=%d score=%.1f done=%s prompt_hash=%s prompt_version=%s",
         brief.candidate_name,
         new_followup_count,
         new_score,
         done,
+        prompt.hash,
+        prompt.version,
     )
     return {
         "interview_transcript": new_transcript,
         "followup_count": new_followup_count,
         "interview_score": round(new_score, 1),
         "interview_done": done,
+        "interview_prompt_hash": prompt.hash,
+        "interview_prompt_version": prompt.version,
     }
 
 
@@ -331,6 +356,7 @@ def human_review_node(state: AgentState) -> dict:
 
 def _build_offer_prompt(brief, interview_score: float):
     from app.agentmesh.llm import LLMMessage
+    from app.agentmesh.prompt_versioning import version_prompt
 
     system = (
         "You are finalizing a job offer. Given the candidate's target salary, "
@@ -346,7 +372,10 @@ def _build_offer_prompt(brief, interview_score: float):
         f"Interview score: {interview_score:.1f}/100\n\n"
         f"Propose the offer amount."
     )
-    return [LLMMessage(role="system", content=system), LLMMessage(role="user", content=user)]
+    return version_prompt(
+        [LLMMessage(role="system", content=system), LLMMessage(role="user", content=user)],
+        version=OFFER_PROMPT_VERSION,
+    )
 
 
 def _parse_offer_response(content: str, brief, interview_score: float) -> tuple[float, str]:
@@ -386,11 +415,11 @@ async def offer_decision_node(state: AgentState) -> dict:
     brief = state["brief"]
     interview_score = state.get("interview_score", 50.0)
 
-    messages = _build_offer_prompt(brief, interview_score)
+    prompt = _build_offer_prompt(brief, interview_score)
     try:
         from app.agentmesh.llm import get_llm_client
         client = get_llm_client()
-        response = await client.complete(messages, temperature=0.0, max_tokens=300)
+        response = await client.complete(prompt.messages, temperature=0.0, max_tokens=300)
         amount, rationale = _parse_offer_response(response.content, brief, interview_score)
     except Exception as e:
         logger.warning("OFFER_LLM_FAILED error=%s — falling back to deterministic offer", e)
@@ -402,11 +431,19 @@ async def offer_decision_node(state: AgentState) -> dict:
         )
 
     logger.info(
-        "OFFER_DECISION_COMPLETED candidate=%s amount=%.0f",
+        "OFFER_DECISION_COMPLETED candidate=%s amount=%.0f prompt_hash=%s prompt_version=%s",
         brief.candidate_name,
         amount,
+        prompt.hash,
+        prompt.version,
     )
-    return {"offer_amount": amount, "decision_reason": rationale, "final_status": "awaiting_offer"}
+    return {
+        "offer_amount": amount,
+        "decision_reason": rationale,
+        "final_status": "awaiting_offer",
+        "offer_prompt_hash": prompt.hash,
+        "offer_prompt_version": prompt.version,
+    }
 
 
 # ── Conditional edges ──

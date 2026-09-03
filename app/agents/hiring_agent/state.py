@@ -46,6 +46,8 @@ class AgentState(TypedDict, total=False):
     screening_notes: str
     skills_matched: list[str]
     screening_feedback: str  # feedback from a previous human rejection, if any
+    screen_prompt_hash: str  # SHA256[:16] of the rendered screen prompt
+    screen_prompt_version: str  # human-readable version tag
 
     # Score rubric node output (deterministic — NO LLM)
     screening_score: float
@@ -58,6 +60,8 @@ class AgentState(TypedDict, total=False):
     followup_count: int
     interview_score: float
     interview_done: bool
+    interview_prompt_hash: str  # SHA256[:16] of the rendered interview prompt
+    interview_prompt_version: str  # human-readable version tag
 
     # Human review node output (interrupt() checkpoint)
     approval_status: str  # "approved" | "rejected"
@@ -67,6 +71,8 @@ class AgentState(TypedDict, total=False):
     # Offer decision node output (agentic)
     offer_amount: float
     decision_reason: str
+    offer_prompt_hash: str  # SHA256[:16] of the rendered offer prompt
+    offer_prompt_version: str  # human-readable version tag
 
     # Terminal status set by reject / offer_decision nodes
     final_status: str  # "rejected_by_score" | "awaiting_offer" | "rejected"

@@ -184,8 +184,8 @@ async def decide_node(state: AgentState) -> dict:
     except Exception as e:
         logger.warning("MEMORY_QUERY_FAILED item=%s error=%s", item, e)
 
-    # Build the LLM prompt
-    messages = build_decide_prompt(item, quantity, budget, scored, past_decisions)
+    # Build the LLM prompt (returns PromptVersion with hash + version)
+    prompt = build_decide_prompt(item, quantity, budget, scored, past_decisions)
 
     # Call the LLM through the adapter interface
     # Trace context is propagated automatically by Temporal's OTel interceptor
@@ -194,23 +194,27 @@ async def decide_node(state: AgentState) -> dict:
         from app.agentmesh.llm import get_llm_client
         client = get_llm_client()
         response = await client.complete(
-            messages=messages,
+            messages=prompt.messages,
             temperature=0.0,
             max_tokens=1000,
         )
         selected, rationale = parse_llm_decision(response.content, scored)
         logger.info(
-            "DECIDE_LLM_COMPLETED selected=%s model=%s tokens=%s cost_usd=%.6f",
+            "DECIDE_LLM_COMPLETED selected=%s model=%s tokens=%s cost_usd=%.6f prompt_hash=%s prompt_version=%s",
             selected["name"],
             response.model,
             response.usage.get("total_tokens", "?"),
             response.cost_usd,
+            prompt.hash,
+            prompt.version,
         )
         return {
             "selected_supplier": selected,
             "decision_reason": rationale,
             "past_decisions": past_decisions,
             "cost_incurred": response.cost_usd,
+            "prompt_hash": prompt.hash,
+            "prompt_version": prompt.version,
         }
     except Exception as e:
         logger.warning("DECIDE_LLM_FAILED error=%s — falling back to scored[0]", e)

@@ -26,6 +26,7 @@ class SourcingResult(BaseModel):
     cost_incurred: float = 0.0
     cost_budget: float = 0.0
     verification_error: str = ""
+    prompt_version: str = ""  # which prompt version was used for the decide node
 
 
 class ResearchResult(BaseModel):
@@ -80,6 +81,8 @@ class AgentState(TypedDict, total=False):
     # Decide node output
     selected_supplier: dict
     decision_reason: str
+    prompt_hash: str  # SHA256[:16] of the rendered decide prompt (prompt versioning)
+    prompt_version: str  # human-readable version tag (e.g. "v1")
 
     # Approve node output
     approval_status: str  # "approved" | "rejected"

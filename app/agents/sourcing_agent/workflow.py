@@ -265,6 +265,7 @@ class SourcingWorkflow:
             approval_status="approved",
             cost_incurred=total_cost,
             cost_budget=cost_budget,
+            prompt_version=graph_result.get("prompt_version", ""),
         )
 
     # ── Signal handler ──

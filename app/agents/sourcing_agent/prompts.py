@@ -2,11 +2,21 @@
 
 Extracted from graph.py to keep file sizes under 500 LOC.
 These are pure functions — no I/O, no state, no side effects.
+
+Prompt versioning: build_decide_prompt returns a PromptVersion containing
+the messages, a SHA256 hash of the rendered prompt, and a version tag.
+The hash + version are stored in the graph state and checkpointed by
+LangGraph, so every past run has a permanent record of which prompt was used.
 """
 
 import json
 
 from app.agentmesh.llm import LLMMessage
+from app.agentmesh.prompt_versioning import PromptVersion, version_prompt
+
+# Bump this when you change the decide prompt template.
+# Old runs keep their version in the checkpoint. New runs get the new one.
+DECIDE_PROMPT_VERSION = "v1"
 
 
 def build_decide_prompt(
@@ -15,11 +25,13 @@ def build_decide_prompt(
     budget: float,
     scored_suppliers: list[dict],
     past_decisions: list[dict],
-) -> list:
+) -> PromptVersion:
     """Build the LLM prompt for the Decide node.
 
-    Returns a list of LLMMessage objects: a system message defining the
-    agent's role, and a user message with the supplier data + past decisions.
+    Returns a PromptVersion containing:
+      - messages: list of LLMMessage objects (system + user)
+      - hash: SHA256[:16] of the rendered messages
+      - version: human-readable version tag (e.g. "v1")
     """
     system = (
         "You are a sourcing agent that selects the best supplier for a procurement request. "
@@ -66,10 +78,13 @@ def build_decide_prompt(
         f"Select the best supplier and explain your reasoning."
     )
 
-    return [
-        LLMMessage(role="system", content=system),
-        LLMMessage(role="user", content=user),
-    ]
+    return version_prompt(
+        [
+            LLMMessage(role="system", content=system),
+            LLMMessage(role="user", content=user),
+        ],
+        version=DECIDE_PROMPT_VERSION,
+    )
 
 
 def parse_llm_decision(content: str, scored_suppliers: list[dict]) -> tuple[dict, str]:
