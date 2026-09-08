@@ -1,24 +1,28 @@
 """
-Graph kill test — kill Worker while paused at the Approve node.
+Graph kill test — kill Worker while paused at the approval gate.
 
-Proves that the LangGraph checkpointer + Temporal's Activity retry together
-ensure the graph resumes at the Approve node (not Research) after a Worker
-kill while paused.
+Proves that Temporal owns 100% of durable state (task_1 refactor): the
+graph runs statelessly inside the Activity, returns its full state to
+Temporal's Event History, and the workflow's wait_condition owns the
+pause. After a Worker kill, Temporal replays the workflow — the state
+is already in Event History, so the resume Activity gets the same
+state and the graph resumes at Process Approval (not Research).
 
 Flow:
 1. Start Worker A.
-2. Submit a workflow — the graph runs Research → Score → Decide → Approve.
-3. The graph pauses at Approve (interrupt() fires).
+2. Submit a workflow — the graph runs Research → Score → Decide → gate.
+3. The graph pauses (workflow is RUNNING, waiting for the approve signal).
 4. SIGKILL Worker A.
 5. Start Worker B.
 6. Send the approval signal.
-7. Assert the workflow completes (graph resumes at Approve, not Research).
+7. Assert the workflow completes (graph resumes at Process Approval).
 8. Assert the result has approval_status = "approved" and PO + payment IDs.
 
-The key proof: if the checkpointer didn't work, the graph would restart
-from Research after the Worker kill, re-querying suppliers. With the
-checkpointer, the graph's state at Approve is persisted in Postgres, so
-the resume Activity picks up exactly where it left off.
+The key proof: the graph is stateless — no checkpointer. Temporal's
+Event History IS the checkpoint. If replay didn't work, the graph would
+restart from Research after the Worker kill. With Temporal owning
+state, the resume Activity receives the saved state + approval and the
+graph's START router sends it straight to Process Approval.
 """
 
 import asyncio

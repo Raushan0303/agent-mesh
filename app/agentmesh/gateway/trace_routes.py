@@ -56,10 +56,10 @@ async def get_workflow_trace(workflow_id: str) -> JSONResponse:
             "span_id": "act-1",
             "parent_id": "wf-run",
             "service": "agentmesh-worker",
-            "name": "activity.run_graph_until_interrupt",
+            "name": "activity.run_sourcing_graph",
             "duration_ms": 2800,
             "attributes": {
-                "activity_type": "run_graph_until_interrupt",
+                "activity_type": "run_sourcing_graph",
                 "retry_policy": "aggressive",
             },
         },

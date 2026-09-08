@@ -1,19 +1,24 @@
-"""SourcingWorkflow — Week 4: human-in-the-loop with interrupt() + Signals.
+"""SourcingWorkflow — Temporal owns 100% of durable state (task_1 refactor).
 
 Flow:
-  1. Activity: run_graph_until_interrupt
-     → runs Research → Score → Decide → Approve
-     → interrupt() fires, graph pauses
-     → Activity returns with paused=True + approval_request
+  1. Activity: run_sourcing_graph(initial_state)
+     → runs Research → Score → Decide → hits the approval gate
+     → returns the FULL graph state (recorded in Temporal Event History)
 
-  2. Workflow waits for "approve" Signal (human calls /approve endpoint)
+  2. while the graph is paused:
+     → workflow.wait_condition() for the "approve" Signal (Temporal owns
+       the wait — no checkpointer, no LangGraph persistence)
+     → Activity: run_sourcing_graph(saved_state + approval)
+       → the graph's START router goes straight to Process Approval
+     → on rejection the graph may loop back to Research and pause again —
+       the while loop handles re-pauses natively
 
-  3. Activity: resume_graph
-     → Command(resume=approval_data) unblocks interrupt()
-     → runs Approve (resumed) → Confirm → END
-
-  4. If approved → create_po_activity + initiate_payment_activity
+  3. If approved → create_po_activity + initiate_payment_activity
      If rejected → return with status="rejected"
+
+The LangGraph graph is a pure in-memory reasoning unit inside the
+Activity. State crosses the Activity boundary as a plain dict — Temporal
+records it, Temporal owns it.
 """
 
 import asyncio
@@ -26,9 +31,8 @@ with workflow.unsafe.imports_passed_through():
         create_po_activity,
         initiate_payment_activity,
         run_agent_graph,
-        run_graph_until_interrupt,
-        resume_graph,
         run_research_activity,
+        run_sourcing_graph,
         score_suppliers_activity,
     )
     from app.agents.sourcing_agent.verification import (
@@ -39,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
         SourcingBriefInput,
         SourcingResult,
     )
+    from app.agentmesh.contract import TaskContract, DoneCondition, EscalateCondition, evaluate_contract
     from app.core.constants import (
         AGGRESSIVE_RETRY_TEMPLATE,
         GRAPH_SCHEDULE_TO_CLOSE,
@@ -64,7 +69,7 @@ class SourcingWorkflow:
 
     @workflow.run
     async def run(self, brief: SourcingBriefInput) -> SourcingResult:
-        """Run the 5-node graph with human approval checkpoint."""
+        """Run the graph with Temporal-owned pauses for human approval."""
         # Resolve cost budget (0 = use default from settings)
         cost_budget = brief.cost_budget_usd
         if cost_budget <= 0:
@@ -73,11 +78,18 @@ class SourcingWorkflow:
 
         total_cost = 0.0
 
-        # Activity 1: Run the graph until interrupt() or completion
-        # Graph activities get longer timeouts (the graph runs multiple tools)
+        # Activity: run the graph until the approval gate (or completion).
+        # The state crosses the boundary as a plain dict — Temporal
+        # records the full state in Event History.
         graph_result = await workflow.execute_activity(
-            run_graph_until_interrupt,
-            brief,
+            run_sourcing_graph,
+            {
+                "brief": brief.model_dump(),
+                "trace_id": getattr(brief, "trace_id", "") or "",
+                "suppliers": [],
+                "attempts": 0,
+                "status": "running",
+            },
             start_to_close_timeout=GRAPH_START_TO_CLOSE,
             schedule_to_start_timeout=GRAPH_SCHEDULE_TO_START,
             schedule_to_close_timeout=GRAPH_SCHEDULE_TO_CLOSE,
@@ -85,8 +97,75 @@ class SourcingWorkflow:
         )
 
         total_cost += graph_result.get("cost_incurred", 0.0)
+        state = graph_result.get("state", {})
 
-        # Cost check after graph activity
+        # Pause loop — Temporal owns the wait. Each re-pause (e.g. after
+        # a rejection-retry) waits for a fresh approval signal.
+        while graph_result.get("paused", False):
+            # Cost check before waiting on a human
+            if total_cost > cost_budget:
+                workflow.logger.warning(
+                    "COST_BUDGET_EXCEEDED spent=%.4f budget=%.4f (paused at approval gate)",
+                    total_cost, cost_budget,
+                )
+                return SourcingResult(
+                    suppliers=graph_result.get("suppliers", []),
+                    status="cost_exceeded",
+                    attempts=graph_result.get("attempts", 0),
+                    cost_incurred=total_cost,
+                    cost_budget=cost_budget,
+                )
+
+            approval_request = graph_result.get("approval_request", {})
+            workflow.logger.info(
+                "WORKFLOW_PAUSED_AT_APPROVAL waiting_for_signal supplier=%s",
+                approval_request.get("supplier", ""),
+            )
+
+            # Wait for the "approve" signal — Temporal owns the wait.
+            try:
+                await workflow.wait_condition(
+                    lambda: self._approval_received,
+                    timeout=timedelta(hours=24),
+                )
+            except asyncio.TimeoutError:
+                pass
+
+            if not self._approval_received:
+                # Timeout — no approval received in 24 hours
+                selected = state.get("selected_supplier", {})
+                return SourcingResult(
+                    suppliers=graph_result.get("suppliers", []),
+                    status="timeout",
+                    attempts=graph_result.get("attempts", 0),
+                    selected_supplier=selected.get("name") if selected else None,
+                    approval_status="timeout",
+                    cost_incurred=total_cost,
+                    cost_budget=cost_budget,
+                )
+
+            # Inject the human's decision into the saved state and resume —
+            # a FRESH stateless invocation, not a checkpoint reload.
+            self._approval_received = False
+            resume_state = {**state, "approval": self._approval_data}
+            graph_result = await workflow.execute_activity(
+                run_sourcing_graph,
+                resume_state,
+                start_to_close_timeout=GRAPH_START_TO_CLOSE,
+                schedule_to_start_timeout=GRAPH_SCHEDULE_TO_START,
+                schedule_to_close_timeout=GRAPH_SCHEDULE_TO_CLOSE,
+                retry_policy=AGGRESSIVE_RETRY_TEMPLATE,
+            )
+
+            total_cost += graph_result.get("cost_incurred", 0.0)
+            state = graph_result.get("state", {})
+
+        # The graph finished — extract terminal state
+        final_status = graph_result.get("status", "failed")
+        approval_status = graph_result.get("approval_status", "")
+        selected = graph_result.get("selected_supplier") or state.get("selected_supplier", {})
+
+        # Cost check after graph completion
         if total_cost > cost_budget:
             workflow.logger.warning(
                 "COST_BUDGET_EXCEEDED spent=%.4f budget=%.4f (after graph)",
@@ -96,85 +175,20 @@ class SourcingWorkflow:
                 suppliers=graph_result.get("suppliers", []),
                 status="cost_exceeded",
                 attempts=graph_result.get("attempts", 0),
-                cost_incurred=total_cost,
-                cost_budget=cost_budget,
-            )
-
-        # If the graph completed without pausing (no_matches), return early
-        if not graph_result.get("paused", False):
-            return SourcingResult(
-                suppliers=graph_result.get("suppliers", []),
-                status=graph_result.get("status", "failed"),
-                attempts=graph_result.get("attempts", 0),
-                cost_incurred=total_cost,
-                cost_budget=cost_budget,
-            )
-
-        # The graph paused at Approve — wait for human signal
-        approval_request = graph_result.get("approval_request", {})
-        selected = graph_result.get("selected_supplier", {})
-
-        workflow.logger.info(
-            "WORKFLOW_PAUSED_AT_APPROVE waiting_for_signal supplier=%s",
-            approval_request.get("supplier", ""),
-        )
-
-        # Wait for the "approve" signal
-        approval_data = await workflow.wait_condition(
-            lambda: self._approval_received,
-            timeout=timedelta(hours=24),
-        )
-
-        if not self._approval_received:
-            # Timeout — no approval received in 24 hours
-            return SourcingResult(
-                suppliers=graph_result.get("suppliers", []),
-                status="timeout",
-                attempts=graph_result.get("attempts", 0),
-                selected_supplier=selected.get("name") if selected else None,
-                approval_status="timeout",
-                cost_incurred=total_cost,
-                cost_budget=cost_budget,
-            )
-
-        # Activity 2: Resume the graph with the approval data
-        resume_result = await workflow.execute_activity(
-            resume_graph,
-            self._approval_data,
-            start_to_close_timeout=GRAPH_START_TO_CLOSE,
-            schedule_to_start_timeout=GRAPH_SCHEDULE_TO_START,
-            schedule_to_close_timeout=GRAPH_SCHEDULE_TO_CLOSE,
-            retry_policy=AGGRESSIVE_RETRY_TEMPLATE,
-        )
-
-        total_cost += resume_result.get("cost_incurred", 0.0)
-
-        # Cost check after resume
-        if total_cost > cost_budget:
-            workflow.logger.warning(
-                "COST_BUDGET_EXCEEDED spent=%.4f budget=%.4f (after resume)",
-                total_cost, cost_budget,
-            )
-            return SourcingResult(
-                suppliers=graph_result.get("suppliers", []),
-                status="cost_exceeded",
-                attempts=graph_result.get("attempts", 0),
                 selected_supplier=selected.get("name") if selected else None,
                 cost_incurred=total_cost,
                 cost_budget=cost_budget,
             )
 
-        final_status = resume_result.get("status", "completed")
-        approval_status = resume_result.get("approval_status", "approved")
-
-        # If rejected, return without creating PO or payment
-        if final_status == "rejected" or approval_status == "rejected":
+        # If the graph ended without approval (no_matches, or rejected
+        # after max retries), return without side effects
+        if final_status != "completed":
             return SourcingResult(
                 suppliers=graph_result.get("suppliers", []),
-                status="rejected",
+                status=final_status,
                 attempts=graph_result.get("attempts", 0),
                 selected_supplier=selected.get("name") if selected else None,
-                approval_status="rejected",
+                approval_status=approval_status or None,
                 cost_incurred=total_cost,
                 cost_budget=cost_budget,
             )
@@ -193,9 +207,10 @@ class SourcingWorkflow:
         )
 
         # Verify the PO was actually created (never trust the activity's self-report)
+        # Now with field-level checks — not just existence, but correctness
         po_verification = await workflow.execute_activity(
             verify_po_exists,
-            args=(po_result["po_id"],),
+            args=(po_result["po_id"], selected.get("name", ""), brief.item, brief.quantity, unit_price),
             start_to_close_timeout=READ_ONLY_START_TO_CLOSE,
             schedule_to_start_timeout=READ_ONLY_SCHEDULE_TO_START,
             schedule_to_close_timeout=READ_ONLY_SCHEDULE_TO_CLOSE,
@@ -203,17 +218,22 @@ class SourcingWorkflow:
         )
 
         if not po_verification.get("verified", False):
+            po_status = po_verification.get("status", "failed")
             workflow.logger.error(
-                "PO_VERIFICATION_FAILED po_id=%s — not found in database",
+                "PO_VERIFICATION_%s po_id=%s mismatches=%s",
+                po_status.upper(),
                 po_result["po_id"],
+                po_verification.get("mismatches", []),
             )
+            # UNKNOWN = we can't tell if the PO was created — do NOT retry
+            # (retrying could create a duplicate). Escalate to a human.
             return SourcingResult(
                 suppliers=graph_result.get("suppliers", []),
-                status="verification_failed",
+                status=f"verification_{po_status}",
                 attempts=graph_result.get("attempts", 0),
                 selected_supplier=selected.get("name") if selected else None,
                 approval_status="approved",
-                verification_error=f"PO {po_result['po_id']} not found after creation",
+                verification_error=f"PO {po_result['po_id']} verification {po_status}: {po_verification.get('mismatches', [])}",
                 cost_incurred=total_cost,
                 cost_budget=cost_budget,
             )
@@ -229,9 +249,10 @@ class SourcingWorkflow:
         )
 
         # Verify the payment was actually initiated
+        # Now with amount check — catches partial writes and stale results
         payment_verification = await workflow.execute_activity(
             verify_payment_initiated,
-            args=(payment_result["payment_id"],),
+            args=(payment_result["payment_id"], total_amount),
             start_to_close_timeout=READ_ONLY_START_TO_CLOSE,
             schedule_to_start_timeout=READ_ONLY_SCHEDULE_TO_START,
             schedule_to_close_timeout=READ_ONLY_SCHEDULE_TO_CLOSE,
@@ -239,20 +260,78 @@ class SourcingWorkflow:
         )
 
         if not payment_verification.get("verified", False):
+            pay_status = payment_verification.get("status", "failed")
             workflow.logger.error(
-                "PAYMENT_VERIFICATION_FAILED payment_id=%s — not found in database",
+                "PAYMENT_VERIFICATION_%s payment_id=%s mismatches=%s",
+                pay_status.upper(),
                 payment_result["payment_id"],
+                payment_verification.get("mismatches", []),
             )
+            # UNKNOWN = we can't tell if the payment was initiated — do NOT
+            # retry (retrying could double-charge). Escalate to a human.
             return SourcingResult(
                 suppliers=graph_result.get("suppliers", []),
-                status="verification_failed",
+                status=f"verification_{pay_status}",
                 attempts=graph_result.get("attempts", 0),
                 po_id=po_result["po_id"],
                 selected_supplier=selected.get("name") if selected else None,
                 approval_status="approved",
-                verification_error=f"Payment {payment_result['payment_id']} not confirmed",
+                verification_error=f"Payment {payment_result['payment_id']} verification {pay_status}: {payment_verification.get('mismatches', [])}",
                 cost_incurred=total_cost,
                 cost_budget=cost_budget,
+            )
+
+        # Evaluate the task contract — done_when conditions must pass
+        # before status="completed". Empty contract = no checks (backward compatible).
+        contract = TaskContract(
+            done_when=[DoneCondition(check=c) for c in brief.done_when],
+            escalate_when=[EscalateCondition(trigger=t) for t in brief.escalate_when],
+        )
+        contract_state = {
+            "suppliers": graph_result.get("suppliers", []),
+            "status": graph_result.get("status", ""),
+            "rejection_count": graph_result.get("rejection_count", 0),
+        }
+        contract_evidence = {
+            "po_created": po_verification,
+            "payment_initiated": payment_verification,
+        }
+        contract_result = evaluate_contract(
+            contract, contract_state, contract_evidence, total_cost, cost_budget,
+        )
+        if contract_result.escalated:
+            workflow.logger.warning(
+                "CONTRACT_ESCALATED reason=%s", contract_result.escalation_reason,
+            )
+            return SourcingResult(
+                suppliers=graph_result.get("suppliers", []),
+                status="escalated",
+                attempts=graph_result.get("attempts", 0),
+                po_id=po_result["po_id"],
+                payment_id=payment_result["payment_id"],
+                selected_supplier=selected.get("name") if selected else None,
+                approval_status="approved",
+                verification_error=contract_result.escalation_reason,
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
+                prompt_version=graph_result.get("prompt_version", ""),
+            )
+        if not contract_result.all_passed:
+            workflow.logger.warning(
+                "CONTRACT_UNMET failed=%s", contract_result.failed,
+            )
+            return SourcingResult(
+                suppliers=graph_result.get("suppliers", []),
+                status="contract_unmet",
+                attempts=graph_result.get("attempts", 0),
+                po_id=po_result["po_id"],
+                payment_id=payment_result["payment_id"],
+                selected_supplier=selected.get("name") if selected else None,
+                approval_status="approved",
+                verification_error=f"Failed checks: {contract_result.failed}",
+                cost_incurred=total_cost,
+                cost_budget=cost_budget,
+                prompt_version=graph_result.get("prompt_version", ""),
             )
 
         return SourcingResult(

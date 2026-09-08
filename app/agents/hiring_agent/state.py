@@ -13,13 +13,19 @@ class HiringBriefInput(BaseModel):
     target_salary: float
     notice_period_days: int | None = None
 
+    # Task contract (task_7 phase 2) — objective completion + escalation
+    constraints: list[str] = []
+    deliverable: str = "offer_letter"
+    done_when: list[str] = []  # check names: "offer_sent", "cost_within_budget"
+    escalate_when: list[str] = []  # trigger names: "repeated_rejection", "verification_unknown"
+
 
 class HiringResult(BaseModel):
     """Output schema — returned by the Workflow."""
 
     candidate_name: str
     role: str
-    status: str  # "completed" | "rejected_by_score" | "rejected" | "timeout" | "failed"
+    status: str  # "completed" | "rejected_by_score" | "rejected" | "timeout" | "verification_failed" | "failed"
     screening_score: float | None = None
     interview_score: float | None = None
     skills_matched: list[str] | None = None
@@ -63,7 +69,8 @@ class AgentState(TypedDict, total=False):
     interview_prompt_hash: str  # SHA256[:16] of the rendered interview prompt
     interview_prompt_version: str  # human-readable version tag
 
-    # Human review node output (interrupt() checkpoint)
+    # Process review node — approval injected by the workflow on resume
+    approval: dict  # {"approved": bool, "comment": str}
     approval_status: str  # "approved" | "rejected"
     approval_comment: str
     rejection_count: int  # incremented on each rejection, used for retry limit

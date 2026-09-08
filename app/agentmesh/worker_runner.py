@@ -17,9 +17,8 @@ from app.agents.sourcing_agent.activity import (
     create_po_activity,
     initiate_payment_activity,
     run_agent_graph,
-    run_graph_until_interrupt as sourcing_run_graph_until_interrupt,
-    resume_graph as sourcing_resume_graph,
     run_research_activity,
+    run_sourcing_graph,
     score_suppliers_activity,
 )
 from app.agents.sourcing_agent.verification import (
@@ -28,14 +27,14 @@ from app.agents.sourcing_agent.verification import (
 )
 from app.agents.sourcing_agent import TASK_QUEUE as SOURCING_TASK_QUEUE
 
-# Hiring agent — same engine (Temporal + LangGraph + interrupt()), a harder
-# problem: screen -> score -> schedule -> interview -> human review -> offer
+# Hiring agent — same engine (Temporal durability + stateless LangGraph),
+# a harder problem: screen -> score -> schedule -> interview -> human review -> offer
 from app.agents.hiring_agent.workflow import HiringWorkflow
 from app.agents.hiring_agent.activity import (
-    run_graph_until_interrupt as hiring_run_graph_until_interrupt,
-    resume_graph as hiring_resume_graph,
+    run_hiring_graph,
     send_offer_activity,
 )
+from app.agents.hiring_agent.verification import verify_offer_sent
 from app.agents.hiring_agent import TASK_QUEUE as HIRING_TASK_QUEUE
 from app.agents.hiring_agent.db import init_tables as init_hiring_tables
 
@@ -62,9 +61,8 @@ async def main():
             workflows=[SourcingWorkflow],
             activities=[
                 run_agent_graph,
-                sourcing_run_graph_until_interrupt,
-                sourcing_resume_graph,
                 run_research_activity,
+                run_sourcing_graph,
                 create_po_activity,
                 initiate_payment_activity,
                 score_suppliers_activity,
@@ -77,9 +75,9 @@ async def main():
             task_queue=HIRING_TASK_QUEUE,
             workflows=[HiringWorkflow],
             activities=[
-                hiring_run_graph_until_interrupt,
-                hiring_resume_graph,
+                run_hiring_graph,
                 send_offer_activity,
+                verify_offer_sent,
             ],
         ),
         run_worker(

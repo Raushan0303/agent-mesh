@@ -1,39 +1,47 @@
-"""LangGraph StateGraph for the hiring agent.
+"""LangGraph StateGraph for the hiring agent — stateless reasoning engine.
 
-Same engine as the sourcing agent (Temporal durability + LangGraph nodes +
-interrupt() for human checkpoints), applied to a harder, higher-stakes
-workflow: screening, interviewing, and making an offer decision on a
-candidate — with a human recruiter gating the final call.
+Same engine as the sourcing agent (Temporal durability + LangGraph nodes),
+applied to a harder, higher-stakes workflow: screening, interviewing, and
+making an offer decision on a candidate — with a human recruiter gating
+the final call.
 
-Topology (matches the architecture-page diagram exactly):
+STATELESS DESIGN (task_1 refactor): no interrupt(), no checkpointer.
+Temporal owns 100% of durable state. The pause is a conditional edge on
+the interview exit — when the interview is done and no "approval" is in
+state, the run ends and the full state returns to the Temporal Activity.
+A resume invocation injects {"approval": {...}} and the START router
+sends the graph straight to Process Review.
 
-    START -> Screen Resume -> Score Rubric --[score < threshold]--> Reject -> END
-                                    |
-                                    v (score >= threshold)
-                              Schedule Interview -> Interview (follow-up loop, <=3)
-                                    |
-                                    v
-                              Human Review (interrupt) --[rejected, retries left]--> Screen Resume (retry w/ feedback)
-                                    |                     --[rejected, out of retries]--> END
-                                    v (approved)
-                              Offer Decision -> END (terminal; send_offer runs as a
-                                                 separate Temporal Activity, same
-                                                 pattern as sourcing's create_po/
-                                                 initiate_payment)
+Topology:
+
+    START -> [_entry_router] -> Screen Resume (fresh) | Process Review (resume)
+    Screen Resume -> Score Rubric --[score < threshold]--> Reject -> END
+                              |
+                              v (score >= threshold)
+                        Schedule Interview -> Interview (follow-up loop, <=3)
+                              |
+                              v (interview done)
+                        [_after_interview gate] --[no approval in state]--> END (pause)
+                              |
+                              v (approval injected)
+                        Process Review --[rejected, retries left]--> Screen Resume
+                              |             --[rejected, out of retries]--> END
+                              v (approved)
+                        Offer Decision -> END (terminal; send_offer runs as a
+                                           separate Temporal Activity)
 
 Node types (deliberately separated, same philosophy as sourcing_agent/graph.py):
   Screen Resume   — agentic (LLM extracts skills/signal from the resume)
   Score Rubric    — deterministic function (NO LLM, pure rubric scoring)
   Schedule        — agentic/tool (single MCP tool call through the registry)
   Interview       — agentic (LLM-driven, bounded follow-up loop)
-  Human Review    — human checkpoint (interrupt() pauses until a recruiter decides)
+  Process Review  — applies the recruiter's decision (pure function)
   Offer Decision  — agentic (LLM proposes the final offer amount)
 """
 
 import logging
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import interrupt
 
 from app.agentmesh.tool_registry import registry
 from app.agents.hiring_agent.mock_ats import extract_matched_skills, skill_bank_for_role
@@ -310,44 +318,36 @@ async def interview_node(state: AgentState) -> dict:
     }
 
 
-# ── Node 5: Human Review (human checkpoint via interrupt()) ──
+# ── Node 5: Process Review (applies the recruiter's decision) ──
 
 
-def human_review_node(state: AgentState) -> dict:
-    """Human Review node: structural checkpoint via LangGraph's interrupt().
+def process_review_node(state: AgentState) -> dict:
+    """Process Review node: apply the recruiter's decision to state.
 
-    Same rationale as sourcing's approve_node — the graph genuinely
-    suspends here. A recruiter must call Command(resume=review_data) via
-    the platform's agent-agnostic POST /workflows/{id}/approve route.
+    STATELESS DESIGN: this node does NOT pause the graph. The pause is
+    the conditional edge after the interview — when the interview is
+    done and no "approval" is in state, the run ends and the full state
+    returns to the Temporal Activity. Temporal's wait_condition owns
+    the wait; a fresh invocation injects state["approval"] and the
+    START router sends the graph straight here.
     """
+    approval = state.get("approval") or {}
+    approved = approval.get("approved", False)
+    comment = approval.get("comment", "")
+
     brief = state["brief"]
-
-    review_request = {
-        "candidate_name": brief.candidate_name,
-        "role": brief.role,
-        "screening_score": state.get("screening_score", 0.0),
-        "interview_score": state.get("interview_score", 0.0),
-        "skills_matched": state.get("skills_matched", []),
-        "interview_slot": state.get("interview_slot", {}),
-    }
-
     logger.info(
-        "HUMAN_REVIEW_INTERRUPT_FIRED candidate=%s screening_score=%.1f interview_score=%.1f",
+        "HUMAN_REVIEW_APPLIED candidate=%s approved=%s comment=%s",
         brief.candidate_name,
-        review_request["screening_score"],
-        review_request["interview_score"],
+        approved,
+        comment,
     )
-
-    review = interrupt(review_request)
-    approved = review.get("approved", False)
-    comment = review.get("comment", "")
-
-    logger.info("HUMAN_REVIEW_RESUMED approved=%s comment=%s", approved, comment)
 
     return {
         "approval_status": "approved" if approved else "rejected",
         "approval_comment": comment,
         "rejection_count": state.get("rejection_count", 0) + (0 if approved else 1),
+        "approval": None,  # consume — next pause waits for a fresh decision
     }
 
 
@@ -449,6 +449,14 @@ async def offer_decision_node(state: AgentState) -> dict:
 # ── Conditional edges ──
 
 
+def _entry_router(state: AgentState) -> str:
+    """START router: fresh run goes to Screen Resume; a resume invocation
+    carrying the recruiter's "approval" goes straight to Process Review."""
+    if state.get("approval") is not None:
+        return "process_review"
+    return "screen_resume"
+
+
 def _after_score(state: AgentState) -> str:
     if state.get("screening_score", 0.0) < SCORE_THRESHOLD:
         return "reject"
@@ -456,9 +464,13 @@ def _after_score(state: AgentState) -> str:
 
 
 def _after_interview(state: AgentState) -> str:
-    if state.get("interview_done", False):
-        return "human_review"
-    return "interview"
+    """Interview exit: loop for follow-ups; when done, the approval gate —
+    no approval in state → END (pause), approval present → Process Review."""
+    if not state.get("interview_done", False):
+        return "interview"
+    if state.get("approval") is None:
+        return END
+    return "process_review"
 
 
 def _after_human_review(state: AgentState) -> str:
@@ -481,12 +493,13 @@ def _after_human_review(state: AgentState) -> str:
 # ── Graph builder ──
 
 
-def build_hiring_graph(checkpointer=None):
-    """Build the full hiring-agent StateGraph.
+def build_hiring_graph():
+    """Build the stateless hiring-agent StateGraph.
 
-    Args:
-        checkpointer: A LangGraph checkpointer (AsyncPostgresSaver) — required
-            for interrupt() to work, same as build_sourcing_graph.
+    No checkpointer, no interrupt() — the graph is a pure in-memory
+    reasoning unit. Temporal owns the pause (wait_condition), the state
+    (activity results in Event History), and the resume (a fresh
+    invocation carrying the saved state + the recruiter's approval).
     """
     graph = StateGraph(AgentState)
 
@@ -495,24 +508,34 @@ def build_hiring_graph(checkpointer=None):
     graph.add_node("reject", reject_node)
     graph.add_node("schedule", schedule_interview_node)
     graph.add_node("interview", interview_node)
-    graph.add_node("human_review", human_review_node)
+    graph.add_node("process_review", process_review_node)
     graph.add_node("offer_decision", offer_decision_node)
 
-    graph.add_edge(START, "screen_resume")
+    # START → Screen Resume (fresh) or Process Review (resume with approval)
+    graph.add_conditional_edges(
+        START,
+        _entry_router,
+        {"screen_resume": "screen_resume", "process_review": "process_review"},
+    )
+
     graph.add_edge("screen_resume", "score")
 
     graph.add_conditional_edges("score", _after_score, {"reject": "reject", "schedule": "schedule"})
     graph.add_edge("reject", END)
 
     graph.add_edge("schedule", "interview")
-    graph.add_conditional_edges("interview", _after_interview, {"interview": "interview", "human_review": "human_review"})
+    graph.add_conditional_edges(
+        "interview",
+        _after_interview,
+        {"interview": "interview", "process_review": "process_review", END: END},
+    )
 
     graph.add_conditional_edges(
-        "human_review",
+        "process_review",
         _after_human_review,
         {"offer_decision": "offer_decision", "screen_resume": "screen_resume", END: END},
     )
 
     graph.add_edge("offer_decision", END)
 
-    return graph.compile(checkpointer=checkpointer)
+    return graph.compile()

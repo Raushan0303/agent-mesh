@@ -1,26 +1,35 @@
-"""LangGraph StateGraph for the sourcing agent — Week 4: full 5-node graph.
+"""LangGraph StateGraph for the sourcing agent — stateless reasoning engine.
 
 Node types (deliberately separated):
-  Research  — agentic (multi-tool sequence through the Tool Registry)
-  Score     — deterministic function (NO LLM, pure ranking logic)
-  Decide    — agentic (picks best supplier from scored list)
-  Approve   — human checkpoint (interrupt() pauses until human approves)
-  Confirm   — agentic (finalizes, returns result)
+  Research         — agentic (multi-tool sequence through the Tool Registry)
+  Score            — deterministic function (NO LLM, pure ranking logic)
+  Decide           — agentic (picks best supplier from scored list)
+  Process Approval — applies the human's decision (pure function)
+  Confirm          — agentic (finalizes, returns result)
 
 The Score node is plain deterministic code, not an LLM call — this is
 intentional. Not every node should be an LLM call. Scoring is a pure
 function of price, rating, and lead time; adding an LLM here would
 make it non-reproducible and harder to debug.
 
-The Approve node uses LangGraph's interrupt() — a structural checkpoint,
-not a prompt asking the model to be careful. The graph genuinely suspends
-until a human calls /approve, which sends Command(resume=approval_data).
+STATELESS DESIGN (task_1 refactor):
+  The graph no longer uses interrupt() or a checkpointer. Temporal owns
+  100% of durable state. The pause point is a conditional edge:
+
+    decide → _approval_gate → END      (no approval in state → pause)
+                          → process_approval  (approval present → apply it)
+
+  Phase 1 activity invokes with an initial state (no "approval" key).
+  The graph runs to the gate and returns the FULL state dict — which
+  Temporal records in its Event History. Phase 2 activity invokes with
+  the same state + {"approval": {...}}; the START router sends it
+  straight to process_approval. No thread_id, no ainvoke(None), no
+  Command(resume=...), no second persistence engine.
 """
 
 import logging
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import interrupt
 
 from app.agentmesh.tool_registry import registry
 from app.agents.sourcing_agent.state import AgentState
@@ -238,60 +247,29 @@ async def decide_node(state: AgentState) -> dict:
     }
 
 
-# ── Node 4: Approve (human checkpoint via interrupt()) ──
+# ── Node 4: Process Approval (applies the human's decision) ──
 
 
-def approve_node(state: AgentState) -> dict:
-    """Approve node: human checkpoint via LangGraph's interrupt().
+def process_approval_node(state: AgentState) -> dict:
+    """Process Approval node: apply the human's decision to state.
 
-    This is a STRUCTURAL checkpoint, not a prompt. The graph genuinely
-    suspends here — interrupt() pauses execution and waits for a human
-    to call Command(resume=approval_data).
+    STATELESS DESIGN: this node does NOT pause the graph. The pause is a
+    conditional edge (_approval_gate): when the graph reaches it with no
+    "approval" in state, the run ends and the full state returns to the
+    Temporal Activity. Temporal's wait_condition owns the wait.
 
-    The resume value is a dict with:
-      - approved: bool
-      - comment: str (optional)
-
-    If the checkpointer's Postgres connection dropped at this moment,
-    the graph would fail to save the checkpoint. On Worker restart,
-    Temporal would retry the Activity, which would re-invoke the graph
-    from the last checkpoint (before Approve), and interrupt() would
-    fire again — the human would need to approve again. No data loss,
-    but the approval needs to be re-given.
+    When a phase-2 invocation comes in with state["approval"] set (the
+    human's decision, injected by the workflow), the START router sends
+    the graph straight here. This node applies the decision and CLEARS
+    the approval key so a rejection-retry loop pauses again at the gate
+    on the next pass.
     """
-    selected = state.get("selected_supplier", {})
-    brief = state.get("brief", {})
-
-    # Present the decision to the human for approval
-    approval_request = {
-        "item": brief.item if hasattr(brief, "item") else brief.get("item", ""),
-        "quantity": brief.quantity if hasattr(brief, "quantity") else brief.get("quantity", 0),
-        "supplier": selected.get("name", ""),
-        "price": selected.get("price", 0),
-        "lead_time_days": selected.get("lead_time_days", 0),
-        "rating": selected.get("rating", 0),
-        "total_cost": selected.get("price", 0) * (
-            brief.quantity if hasattr(brief, "quantity") else brief.get("quantity", 0)
-        ),
-    }
-
-    logger.info(
-        "APPROVE_INTERRUPT_FIRED supplier=%s item=%s total_cost=%.2f",
-        approval_request["supplier"],
-        approval_request["item"],
-        approval_request["total_cost"],
-    )
-
-    # interrupt() pauses the graph here. The human must call
-    # /approve with a resume value to continue.
-    approval = interrupt(approval_request)
-
-    # approval is the value passed to Command(resume=...)
+    approval = state.get("approval") or {}
     approved = approval.get("approved", False)
     comment = approval.get("comment", "")
 
     logger.info(
-        "APPROVE_RESUMED approved=%s comment=%s",
+        "APPROVAL_APPLIED approved=%s comment=%s",
         approved,
         comment,
     )
@@ -300,6 +278,7 @@ def approve_node(state: AgentState) -> dict:
         "approval_status": "approved" if approved else "rejected",
         "approval_comment": comment,
         "rejection_count": state.get("rejection_count", 0) + (0 if approved else 1),
+        "approval": None,  # consume — next pass through the gate pauses again
     }
 
 
@@ -336,6 +315,23 @@ def confirm_node(state: AgentState) -> dict:
 
 
 # ── Conditional edges ──
+
+
+def _entry_router(state: AgentState) -> str:
+    """START router: fresh run goes to Research; a resume invocation
+    carrying the human's "approval" goes straight to Process Approval."""
+    if state.get("approval") is not None:
+        return "process_approval"
+    return "research"
+
+
+def _approval_gate(state: AgentState) -> str:
+    """Approval gate after Decide: if no approval in state, end the run —
+    the full state returns to the Temporal Activity (the pause). If the
+    human's decision is present, apply it via Process Approval."""
+    if state.get("approval") is None:
+        return END
+    return "process_approval"
 
 
 def _should_retry_or_end(state: AgentState) -> str:
@@ -378,18 +374,20 @@ def _after_approve(state: AgentState) -> str:
 # ── Graph builder ──
 
 
-def build_sourcing_graph(checkpointer=None):
-    """Build the full 5-node LangGraph StateGraph for the sourcing agent.
+def build_sourcing_graph():
+    """Build the stateless LangGraph StateGraph for the sourcing agent.
 
     Topology:
-        START → Research → (retry loop) → Score → Decide → Approve → Confirm → END
-                                              ↓ (rejected)
-                                             END
+        START → [_entry_router] → Research (fresh) | Process Approval (resume)
+        Research → (retry loop) → Score → Decide
+        Decide → [_approval_gate] → END (pause) | Process Approval
+        Process Approval → Confirm (approved) | Research (rejected, retry) | END (maxed)
+        Confirm → END
 
-    Args:
-        checkpointer: A LangGraph checkpointer (e.g., PostgresSaver) for
-            persisting graph state. Required for interrupt() to work —
-            without a checkpointer, interrupt() raises an error.
+    No checkpointer, no interrupt() — the graph is a pure in-memory
+    reasoning unit. Temporal owns the pause (wait_condition), the state
+    (activity results in Event History), and the resume (a fresh
+    invocation carrying the saved state + the human's approval).
     """
     graph = StateGraph(AgentState)
 
@@ -397,11 +395,15 @@ def build_sourcing_graph(checkpointer=None):
     graph.add_node("research", research_node)
     graph.add_node("score", score_node)
     graph.add_node("decide", decide_node)
-    graph.add_node("approve", approve_node)
+    graph.add_node("process_approval", process_approval_node)
     graph.add_node("confirm", confirm_node)
 
-    # Edges
-    graph.add_edge(START, "research")
+    # START → Research (fresh) or Process Approval (resume with approval)
+    graph.add_conditional_edges(
+        START,
+        _entry_router,
+        {"research": "research", "process_approval": "process_approval"},
+    )
 
     # Research → retry loop or Score or END
     graph.add_conditional_edges(
@@ -410,13 +412,17 @@ def build_sourcing_graph(checkpointer=None):
         {"research": "research", "score": "score", END: END},
     )
 
-    # Score → Decide → Approve
+    # Score → Decide → approval gate (pause at END, or apply approval)
     graph.add_edge("score", "decide")
-    graph.add_edge("decide", "approve")
-
-    # Approve → Confirm (if approved), Research (if rejected, retry), or END (max retries)
     graph.add_conditional_edges(
-        "approve",
+        "decide",
+        _approval_gate,
+        {"process_approval": "process_approval", END: END},
+    )
+
+    # Process Approval → Confirm (approved), Research (rejected, retry), or END (max retries)
+    graph.add_conditional_edges(
+        "process_approval",
         _after_approve,
         {"confirm": "confirm", "research": "research", END: END},
     )
@@ -424,4 +430,4 @@ def build_sourcing_graph(checkpointer=None):
     # Confirm → END
     graph.add_edge("confirm", END)
 
-    return graph.compile(checkpointer=checkpointer)
+    return graph.compile()

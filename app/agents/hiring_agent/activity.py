@@ -1,14 +1,23 @@
-"""Temporal Activities for the hiring agent — same two-Activity split as
-sourcing_agent/activity.py:
+"""Temporal Activities for the hiring agent — stateless graph design.
 
-  run_graph_until_interrupt  -> runs Screen Resume -> Score -> (Reject|Schedule)
-                                 -> Interview (follow-up loop) -> Human Review
-                                 returns when interrupt() fires (or graph ends)
-  resume_graph                -> resumes with Command(resume=review_data)
-                                 runs Human Review (resumed) -> Offer Decision -> END
+task_1 refactor: the LangGraph graph is now a pure in-memory reasoning
+unit. There is ONE graph Activity instead of the old
+run_graph_until_interrupt / resume_graph pair:
 
-The graph state is persisted in Postgres via the LangGraph checkpointer,
-keyed by thread_id = workflow_id — same durability story as sourcing.
+  run_hiring_graph(state: dict) -> dict
+
+    Phase 1: workflow passes the initial state (brief set, no "approval").
+      The graph runs Screen Resume → Score → Schedule → Interview →
+      hits the review gate and returns the FULL state dict. Temporal
+      records it in Event History — the checkpoint, owned by the
+      orchestrator.
+
+    Phase 2+: workflow injects the recruiter's decision into the state
+      ({"approval": {...}}) and calls the same Activity again. The
+      START router sends the graph straight to Process Review.
+
+No checkpointer, no thread_id, no ainvoke(None), no Command(resume=...).
+Temporal owns 100% of durable state; LangGraph owns zero.
 """
 
 import logging
@@ -20,139 +29,105 @@ from app.agents.hiring_agent.state import HiringBriefInput
 logger = logging.getLogger("agentmesh.hiring_agent.activity")
 
 
+def _normalize_state_out(state: dict) -> dict:
+    """Make the graph state JSON-safe for the Temporal Activity boundary."""
+    out = dict(state)
+    brief = out.get("brief")
+    if hasattr(brief, "model_dump"):
+        out["brief"] = brief.model_dump()
+    return out
+
+
+def _rehydrate_state_in(state: dict) -> dict:
+    """Convert the serialized state back for the graph — brief dict → model."""
+    out = dict(state)
+    brief = out.get("brief")
+    if isinstance(brief, dict):
+        out["brief"] = HiringBriefInput(**brief)
+    return out
+
+
+def _build_review_request(state: dict) -> dict:
+    """Build the recruiter-facing review request from the paused state."""
+    brief = state.get("brief")
+    candidate = brief.candidate_name if hasattr(brief, "candidate_name") else (brief or {}).get("candidate_name", "")
+    role = brief.role if hasattr(brief, "role") else (brief or {}).get("role", "")
+
+    return {
+        "candidate_name": candidate,
+        "role": role,
+        "screening_score": state.get("screening_score", 0.0),
+        "interview_score": state.get("interview_score", 0.0),
+        "skills_matched": state.get("skills_matched", []),
+        "interview_slot": state.get("interview_slot", {}),
+    }
+
+
 @activity.defn
-async def run_graph_until_interrupt(brief: HiringBriefInput) -> dict:
-    """Activity 1: run the graph until interrupt() fires or the graph ends.
+async def run_hiring_graph(state: dict) -> dict:
+    """Run the hiring graph statelessly — one Activity for both phases.
 
     Returns a dict with:
-      - paused: bool — True if paused at Human Review, False if it ended
-      - review_request: dict — data presented to the recruiter
-      - status: str — "paused" | "rejected_by_score"
-      - screening_score / interview_score / skills_matched
+      - paused: bool — True if the graph stopped at the review gate
+      - awaiting: str | None — "approval" when paused, else None
+      - state: dict — the FULL graph state (JSON-safe) for the next phase
+      - review_request: dict — recruiter-facing summary when paused
+      - status / approval_status / screening_score / interview_score /
+        skills_matched / offer_amount / decision_reason
     """
-    from app.agents.hiring_agent.checkpointer import get_checkpointer
     from app.agents.hiring_agent.graph import build_hiring_graph
 
-    checkpointer = await get_checkpointer()
-    graph = build_hiring_graph(checkpointer=checkpointer)
+    graph = build_hiring_graph()  # no checkpointer — in-memory only
 
-    thread_id = activity.info().workflow_id
-    config = {"configurable": {"thread_id": thread_id}}
-
-    final_state = await graph.ainvoke(
-        {
-            "brief": brief,
-            "screening_feedback": "",
-            "followup_count": 0,
-            "interview_score": 50.0,
-            "interview_transcript": [],
-            "rejection_count": 0,
-        },
-        config,
-    )
+    final_state = await graph.ainvoke(_rehydrate_state_in(state))
 
     final_status = final_state.get("final_status", "")
     approval_status = final_state.get("approval_status", "")
 
-    # Graph ended without pausing — either rejected by score, or (edge case,
-    # same simplification sourcing makes) ran out of retries at Human Review.
-    if final_status == "rejected_by_score":
-        return {
-            "paused": False,
-            "review_request": None,
-            "status": "rejected_by_score",
-            "screening_score": final_state.get("screening_score", 0.0),
-            "interview_score": None,
-            "skills_matched": final_state.get("skills_matched", []),
-        }
+    # Paused = run ended at the review gate: interview done, no terminal
+    # status, no approval decision consumed yet.
+    paused = not final_status and not approval_status
 
-    if final_status:
-        # offer_decision already ran inside this ainvoke (shouldn't normally
-        # happen on the first pass — offer_decision only runs after resume —
-        # but handled for completeness/symmetry with sourcing's activity).
-        return {
-            "paused": False,
-            "review_request": None,
-            "status": final_status,
-            "screening_score": final_state.get("screening_score", 0.0),
-            "interview_score": final_state.get("interview_score", 0.0),
-            "skills_matched": final_state.get("skills_matched", []),
-            "offer_amount": final_state.get("offer_amount"),
-        }
-
-    # Paused at Human Review — the approval_status is empty (not yet set)
-    review_request = {
-        "candidate_name": brief.candidate_name,
-        "role": brief.role,
-        "screening_score": final_state.get("screening_score", 0.0),
-        "interview_score": final_state.get("interview_score", 0.0),
-        "skills_matched": final_state.get("skills_matched", []),
-        "interview_slot": final_state.get("interview_slot", {}),
-    }
-
-    logger.info(
-        "GRAPH_PAUSED_AT_HUMAN_REVIEW thread_id=%s candidate=%s",
-        thread_id,
-        brief.candidate_name,
-    )
-
-    return {
-        "paused": True,
-        "review_request": review_request,
-        "status": "paused",
-        "screening_score": final_state.get("screening_score", 0.0),
-        "interview_score": final_state.get("interview_score", 0.0),
-        "skills_matched": final_state.get("skills_matched", []),
-    }
-
-
-@activity.defn
-async def resume_graph(review_data: dict) -> dict:
-    """Activity 2: resume the graph after the recruiter's decision.
-
-    Resumes with Command(resume=review_data), unblocking interrupt() in
-    Human Review. Runs Offer Decision -> END if approved; if rejected with
-    retries left, the graph loops back to Screen Resume and may pause at
-    Human Review again (same simplification sourcing makes — see
-    graph.py's module docstring).
-    """
-    from langgraph.types import Command
-
-    from app.agents.hiring_agent.checkpointer import get_checkpointer
-    from app.agents.hiring_agent.graph import build_hiring_graph
-
-    checkpointer = await get_checkpointer()
-    graph = build_hiring_graph(checkpointer=checkpointer)
+    if paused:
+        derived_status = "paused"
+    elif final_status:
+        derived_status = final_status
+    elif approval_status == "rejected":
+        derived_status = "rejected"
+    else:
+        derived_status = "failed"
 
     thread_id = activity.info().workflow_id
-    config = {"configurable": {"thread_id": thread_id}}
+    if paused:
+        logger.info(
+            "GRAPH_PAUSED_AT_REVIEW_GATE thread_id=%s candidate=%s",
+            thread_id,
+            _build_review_request(final_state).get("candidate_name", ""),
+        )
+    else:
+        logger.info(
+            "GRAPH_COMPLETED thread_id=%s status=%s approval=%s",
+            thread_id,
+            derived_status,
+            approval_status,
+        )
 
-    logger.info(
-        "GRAPH_RESUMING thread_id=%s approved=%s",
-        thread_id,
-        review_data.get("approved", False),
-    )
-
-    final_state = await graph.ainvoke(None, config, command=Command(resume=review_data))
-
-    final_status = final_state.get("final_status", "awaiting_offer")
-    approval_status = final_state.get("approval_status", "approved")
-
-    logger.info(
-        "GRAPH_COMPLETED thread_id=%s final_status=%s approval=%s",
-        thread_id,
-        final_status,
-        approval_status,
-    )
-
-    return {
-        "status": final_status,
+    result = {
+        "paused": paused,
+        "awaiting": "approval" if paused else None,
+        "state": _normalize_state_out(final_state),
+        "status": derived_status,
         "approval_status": approval_status,
+        "rejection_count": final_state.get("rejection_count", 0),
         "screening_score": final_state.get("screening_score", 0.0),
         "interview_score": final_state.get("interview_score", 0.0),
+        "skills_matched": final_state.get("skills_matched", []),
         "offer_amount": final_state.get("offer_amount"),
         "decision_reason": final_state.get("decision_reason", ""),
     }
+    if paused:
+        result["review_request"] = _build_review_request(final_state)
+    return result
 
 
 @activity.defn
