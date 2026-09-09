@@ -46,7 +46,7 @@ async def test_verify_po_exists_pass():
         result = await verify_po_exists("PO-test123")
 
     assert result["verified"] is True
-    assert result["po_id"] == "PO-test123"
+    assert result["side_effect_id"] == "PO-test123"
     assert result["po_status"] == "created"
     assert result["supplier_name"] == "SupplierAlpha"
 
@@ -60,8 +60,8 @@ async def test_verify_po_exists_fail():
         result = await verify_po_exists("PO-nonexistent")
 
     assert result["verified"] is False
-    assert result["po_id"] == "PO-nonexistent"
-    assert result["po_status"] is None
+    assert result["side_effect_id"] == "PO-nonexistent"
+    assert result["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -79,7 +79,7 @@ async def test_verify_payment_initiated_pass():
         result = await verify_payment_initiated("PAY-test123")
 
     assert result["verified"] is True
-    assert result["payment_id"] == "PAY-test123"
+    assert result["side_effect_id"] == "PAY-test123"
     assert result["payment_status"] == "initiated"
     assert result["po_id"] == "PO-test123"
 
@@ -93,8 +93,8 @@ async def test_verify_payment_initiated_fail():
         result = await verify_payment_initiated("PAY-nonexistent")
 
     assert result["verified"] is False
-    assert result["payment_id"] == "PAY-nonexistent"
-    assert result["payment_status"] is None
+    assert result["side_effect_id"] == "PAY-nonexistent"
+    assert result["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -121,3 +121,134 @@ async def test_verify_payment_initiated_checks_correct_table():
     sql_arg = mock_conn.fetchrow.call_args[0][0]
     assert "sourcing_agent_payment_intents" in sql_arg
     assert "payment_id" in sql_arg
+
+
+@pytest.mark.asyncio
+async def test_verify_po_exists_field_mismatch():
+    """PO exists but supplier_name doesn't match — verification fails."""
+    mock_row = {
+        "po_id": "PO-test123",
+        "status": "created",
+        "supplier_name": "WrongSupplier",  # mismatch
+        "item": "USB-C cable",
+        "quantity": 500,
+        "unit_price": 2.50,
+    }
+    mock_pool, mock_conn = _make_mock_pool(mock_row)
+
+    with patch("app.agents.sourcing_agent.verification.get_db_pool", AsyncMock(return_value=mock_pool)):
+        result = await verify_po_exists(
+            "PO-test123",
+            expected_supplier="RightSupplier",
+            expected_item="USB-C cable",
+            expected_quantity=500,
+            expected_unit_price=2.50,
+        )
+
+    assert result["verified"] is False
+    assert any("supplier_name" in m for m in result["mismatches"])
+
+
+@pytest.mark.asyncio
+async def test_verify_po_exists_all_fields_match():
+    """PO exists and all fields match — verification passes with field checks."""
+    mock_row = {
+        "po_id": "PO-test123",
+        "status": "created",
+        "supplier_name": "SupplierAlpha",
+        "item": "USB-C cable",
+        "quantity": 500,
+        "unit_price": 2.50,
+    }
+    mock_pool, mock_conn = _make_mock_pool(mock_row)
+
+    with patch("app.agents.sourcing_agent.verification.get_db_pool", AsyncMock(return_value=mock_pool)):
+        result = await verify_po_exists(
+            "PO-test123",
+            expected_supplier="SupplierAlpha",
+            expected_item="USB-C cable",
+            expected_quantity=500,
+            expected_unit_price=2.50,
+        )
+
+    assert result["verified"] is True
+    assert result["mismatches"] == []
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_initiated_amount_mismatch():
+    """Payment exists but amount doesn't match — verification fails."""
+    mock_row = {
+        "payment_id": "PAY-test123",
+        "po_id": "PO-test123",
+        "status": "initiated",
+        "amount": 1000.0,  # wrong by a lot
+    }
+    mock_pool, mock_conn = _make_mock_pool(mock_row)
+
+    with patch("app.agents.sourcing_agent.verification.get_db_pool", AsyncMock(return_value=mock_pool)):
+        result = await verify_payment_initiated("PAY-test123", expected_amount=1250.0)
+
+    assert result["verified"] is False
+    assert any("amount" in m for m in result["mismatches"])
+
+
+@pytest.mark.asyncio
+async def test_verify_po_exists_backward_compatible():
+    """PO verification with no expected_* args — backward compatible (existence only)."""
+    mock_row = {
+        "po_id": "PO-test123",
+        "status": "created",
+        "supplier_name": "SupplierAlpha",
+        "item": "USB-C cable",
+        "quantity": 500,
+        "unit_price": 2.50,
+    }
+    mock_pool, mock_conn = _make_mock_pool(mock_row)
+
+    with patch("app.agents.sourcing_agent.verification.get_db_pool", AsyncMock(return_value=mock_pool)):
+        result = await verify_po_exists("PO-test123")
+
+    assert result["verified"] is True
+    assert result["mismatches"] == []
+
+
+@pytest.mark.asyncio
+async def test_verify_po_exists_unknown_on_db_error():
+    """PO verification returns UNKNOWN when the DB query fails — NOT safe to retry."""
+    mock_pool = MagicMock()
+    mock_pool.acquire.side_effect = Exception("connection refused")
+
+    with patch("app.agents.sourcing_agent.verification.get_db_pool", AsyncMock(return_value=mock_pool)):
+        result = await verify_po_exists("PO-test123")
+
+    assert result["verified"] is False
+    assert result["status"] == "unknown"
+    assert "db_query_failed" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_initiated_unknown_on_db_error():
+    """Payment verification returns UNKNOWN when the DB query fails — NOT safe to retry."""
+    mock_pool = MagicMock()
+    mock_pool.acquire.side_effect = Exception("connection refused")
+
+    with patch("app.agents.sourcing_agent.verification.get_db_pool", AsyncMock(return_value=mock_pool)):
+        result = await verify_payment_initiated("PAY-test123")
+
+    assert result["verified"] is False
+    assert result["status"] == "unknown"
+    assert "db_query_failed" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_verify_po_exists_failed_not_unknown_when_row_missing():
+    """PO not found = FAILED (safe to retry), not UNKNOWN."""
+    mock_pool, mock_conn = _make_mock_pool(None)
+
+    with patch("app.agents.sourcing_agent.verification.get_db_pool", AsyncMock(return_value=mock_pool)):
+        result = await verify_po_exists("PO-nonexistent")
+
+    assert result["verified"] is False
+    assert result["status"] == "failed"
+    assert "po_not_found" in result["mismatches"]
