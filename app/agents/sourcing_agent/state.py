@@ -11,6 +11,13 @@ class SourcingBriefInput(BaseModel):
     budget: float
     deadline: str | None = None
     cost_budget_usd: float = 0.0  # per-workflow cost budget; 0 = use default
+    trace_id: str = ""
+
+    # Task contract (task_7 phase 2) — objective completion + escalation
+    constraints: list[str] = []
+    deliverable: str = "purchase_order"
+    done_when: list[str] = []  # check names: "suppliers_found", "po_created", "payment_initiated", "cost_within_budget"
+    escalate_when: list[str] = []  # trigger names: "budget_exceeded", "repeated_rejection", "verification_unknown", "no_matches"
 
 
 class SourcingResult(BaseModel):
@@ -85,6 +92,7 @@ class AgentState(TypedDict, total=False):
     prompt_version: str  # human-readable version tag (e.g. "v1")
 
     # Approve node output
+    approval: dict  # injected by the workflow on resume: {"approved": bool, "comment": str}
     approval_status: str  # "approved" | "rejected"
     approval_comment: str
     rejection_count: int  # incremented on each rejection, used for retry limit
