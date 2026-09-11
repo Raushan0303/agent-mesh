@@ -263,3 +263,79 @@ async def test_sandbox_filesystem_write_is_executed_but_caught():
 
     # Cleanup
     os.remove(test_path)
+
+
+@pytest.mark.asyncio
+async def test_approval_required_blocks_unapproved_tool():
+    """A tool with authorization_mode=APPROVAL_REQUIRED raises if not pre-approved."""
+    from app.agentmesh.tool_registry.exceptions import ToolApprovalRequiredError
+    from app.agentmesh.tool_registry.spec import AuthorizationMode, RiskTier
+
+    reg = ToolRegistry()
+
+    class In(BaseModel):
+        x: int
+
+    class Out(BaseModel):
+        result: int
+
+    async def impl(x: int) -> dict:
+        return {"result": x * 2}
+
+    reg.register(
+        ToolSpec(
+            name="dangerous_tool",
+            input_model=In,
+            output_model=Out,
+            timeout_seconds=5.0,
+            idempotency_required=True,
+            risk_tier=RiskTier.IRREVERSIBLE,
+            authorization_mode=AuthorizationMode.APPROVAL_REQUIRED,
+        ),
+        impl,
+    )
+
+    # Without approval — should raise
+    with pytest.raises(ToolApprovalRequiredError):
+        await reg.call("dangerous_tool", {"x": 5})
+
+    # With approval — should succeed
+    reg.approve_tool("dangerous_tool")
+    result = await reg.call("dangerous_tool", {"x": 5})
+    assert result["result"] == 10
+
+    # Approval is consumed — second call without re-approval should raise
+    with pytest.raises(ToolApprovalRequiredError):
+        await reg.call("dangerous_tool", {"x": 5})
+
+
+@pytest.mark.asyncio
+async def test_automatic_tool_runs_without_approval():
+    """A tool with authorization_mode=AUTOMATIC runs without pre-approval."""
+    from app.agentmesh.tool_registry.spec import RiskTier
+
+    reg = ToolRegistry()
+
+    class In(BaseModel):
+        x: int
+
+    class Out(BaseModel):
+        result: int
+
+    async def impl(x: int) -> dict:
+        return {"result": x}
+
+    reg.register(
+        ToolSpec(
+            name="safe_tool",
+            input_model=In,
+            output_model=Out,
+            timeout_seconds=5.0,
+            idempotency_required=False,
+            risk_tier=RiskTier.READ_ONLY,
+        ),
+        impl,
+    )
+
+    result = await reg.call("safe_tool", {"x": 42})
+    assert result["result"] == 42

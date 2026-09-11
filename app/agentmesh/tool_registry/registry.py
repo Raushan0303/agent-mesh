@@ -2,11 +2,11 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from app.agentmesh.tool_registry.egress import EgressFilter, SandboxedHTTPClient
-from app.agentmesh.tool_registry.exceptions import ToolNotFoundError
+from app.agentmesh.tool_registry.exceptions import ToolApprovalRequiredError, ToolNotFoundError
 from app.agentmesh.tool_registry.output_cap import enforce_output_cap
 from app.agentmesh.tool_registry.sandbox import run_with_timeout
 from app.agentmesh.tool_registry.schema_validation import validate_input, validate_output
-from app.agentmesh.tool_registry.spec import ToolSpec
+from app.agentmesh.tool_registry.spec import AuthorizationMode, ToolSpec
 
 logger = logging.getLogger("agentmesh.tool_registry")
 
@@ -28,6 +28,16 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, tuple[ToolSpec, Callable[..., Awaitable]]] = {}
+        self._approved_tools: set[str] = set()
+
+    def approve_tool(self, name: str) -> None:
+        """Pre-approve a tool for execution (called by the workflow before
+        calling a tool with authorization_mode=APPROVAL_REQUIRED)."""
+        self._approved_tools.add(name)
+
+    def revoke_approval(self, name: str) -> None:
+        """Revoke approval for a tool (after execution, to prevent reuse)."""
+        self._approved_tools.discard(name)
 
     def register(self, spec: ToolSpec, fn: Callable[..., Awaitable]) -> None:
         """Register a tool with its spec and implementation function.
@@ -69,9 +79,28 @@ class ToolRegistry:
 
         spec, fn = entry
 
+        # Step 0: Authorization check — tools with APPROVAL_REQUIRED must be
+        # pre-approved by the workflow before they can execute.
+        if spec.authorization_mode == AuthorizationMode.APPROVAL_REQUIRED:
+            if spec.name not in self._approved_tools:
+                logger.warning(
+                    "TOOL_APPROVAL_REQUIRED name=%s risk_tier=%s — not pre-approved",
+                    spec.name, spec.risk_tier.value,
+                )
+                raise ToolApprovalRequiredError(
+                    f"Tool '{spec.name}' requires approval (risk_tier={spec.risk_tier.value}). "
+                    f"Call registry.approve_tool('{spec.name}') before calling."
+                )
+            # Consume the approval — one tool call per approval
+            self._approved_tools.discard(spec.name)
+
+        logger.info(
+            "TOOL_CALL name=%s risk_tier=%s args_validating=true",
+            spec.name, spec.risk_tier.value,
+        )
+
         # Step 1: Validate input against the registered Pydantic model
         validated_input = validate_input(spec.input_model, args)
-        logger.info("TOOL_CALL name=%s args_validated=true", name)
 
         # Step 2: Create SandboxedHTTPClient if the tool has an egress allowlist
         egress_filter = EgressFilter(spec.allowed_egress) if spec.allowed_egress else None

@@ -6,6 +6,7 @@ from app.agentmesh.reliability import (
     get_circuit_breaker,
 )
 from app.agentmesh.tool_registry import ToolSpec, registry
+from app.agentmesh.tool_registry.spec import RiskTier
 from app.agents.hiring_agent.fault_injection import maybe_inject
 from app.agents.hiring_agent.mock_ats import schedule_slot
 from app.agents.hiring_agent.tool_schemas import (
@@ -130,6 +131,7 @@ def register_hiring_tools() -> None:
             output_model=ScheduleInterviewOutput,
             timeout_seconds=10.0,
             idempotency_required=False,
+            risk_tier=RiskTier.SIDE_EFFECT,
         ),
         schedule_interview_impl,
     )
@@ -140,6 +142,7 @@ def register_hiring_tools() -> None:
             output_model=SendOfferOutput,
             timeout_seconds=15.0,
             idempotency_required=True,
+            risk_tier=RiskTier.IRREVERSIBLE,
         ),
         send_offer_impl,
     )

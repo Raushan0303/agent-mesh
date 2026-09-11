@@ -6,6 +6,7 @@ from app.agentmesh.reliability import (
     get_circuit_breaker,
 )
 from app.agentmesh.tool_registry import ToolSpec, registry
+from app.agentmesh.tool_registry.spec import RiskTier
 from app.agents.sourcing_agent.fault_injection import maybe_inject
 from app.agents.sourcing_agent.mock_marketplace import MOCK_SUPPLIERS, query_mock_marketplace
 from app.agents.sourcing_agent.tool_schemas import (
@@ -239,6 +240,7 @@ def register_sourcing_tools() -> None:
             output_model=QuerySuppliersOutput,
             timeout_seconds=10.0,
             idempotency_required=False,
+            risk_tier=RiskTier.READ_ONLY,
         ),
         query_suppliers_impl,
     )
@@ -249,6 +251,7 @@ def register_sourcing_tools() -> None:
             output_model=GetPriceQuoteOutput,
             timeout_seconds=10.0,
             idempotency_required=False,
+            risk_tier=RiskTier.READ_ONLY,
         ),
         get_price_quote_impl,
     )
@@ -259,6 +262,7 @@ def register_sourcing_tools() -> None:
             output_model=CheckSellerRatingOutput,
             timeout_seconds=10.0,
             idempotency_required=False,
+            risk_tier=RiskTier.READ_ONLY,
         ),
         check_seller_rating_impl,
     )
@@ -269,6 +273,7 @@ def register_sourcing_tools() -> None:
             output_model=CreatePurchaseOrderOutput,
             timeout_seconds=15.0,
             idempotency_required=True,
+            risk_tier=RiskTier.SIDE_EFFECT,
         ),
         create_purchase_order_impl,
     )
@@ -279,6 +284,7 @@ def register_sourcing_tools() -> None:
             output_model=InitiatePaymentOutput,
             timeout_seconds=15.0,
             idempotency_required=True,
+            risk_tier=RiskTier.IRREVERSIBLE,
         ),
         initiate_payment_impl,
     )
