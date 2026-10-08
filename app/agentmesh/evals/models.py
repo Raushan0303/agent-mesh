@@ -56,6 +56,7 @@ class EvalScorecard:
     avg_rag_recall: float | None = None
     avg_judge_score: float | None = None
     semantic_cache_hit_rate: float | None = None
+    planner: str = ""  # "llm" | "fixed" — fixed means tool accuracy is by construction
 
     @property
     def pass_rate(self) -> float:

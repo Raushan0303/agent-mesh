@@ -81,6 +81,7 @@ class AgentState(TypedDict, total=False):
     suppliers: list[dict]
     attempts: int
     status: str  # "running" | "completed" | "no_matches"
+    planner: str  # "llm" (model selects tools) | "fixed" (hard-coded sequence)
 
     # Score node output
     scored_suppliers: list[dict]

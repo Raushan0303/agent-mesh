@@ -15,6 +15,7 @@ from app.agentmesh.llm.client import (
     LLMResponse,
     OpenAICompatibleClient,
     PROVIDER_PRESETS,
+    ToolCall,
     get_llm_client,
     reset_llm_client,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "LLMResponse",
     "OpenAICompatibleClient",
     "PROVIDER_PRESETS",
+    "ToolCall",
     "get_llm_client",
     "reset_llm_client",
 ]

@@ -1,5 +1,7 @@
+import contextvars
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 
 from app.agentmesh.tool_registry.egress import EgressFilter, SandboxedHTTPClient
 from app.agentmesh.tool_registry.exceptions import ToolApprovalRequiredError, ToolNotFoundError
@@ -9,6 +11,9 @@ from app.agentmesh.tool_registry.schema_validation import validate_input, valida
 from app.agentmesh.tool_registry.spec import AuthorizationMode, ToolSpec
 
 logger = logging.getLogger("agentmesh.tool_registry")
+
+# Per-task record of the tools actually invoked (for evals / audit).
+_call_trace: contextvars.ContextVar[list | None] = contextvars.ContextVar("tool_call_trace", default=None)
 
 
 class ToolRegistry:
@@ -64,6 +69,41 @@ class ToolRegistry:
         """Return the names of all registered tools."""
         return list(self._tools.keys())
 
+    def tool_schemas(self, names: list[str]) -> list[dict]:
+        """OpenAI-style function schemas for the named tools (for LLM tool calling)."""
+        schemas = []
+        for name in names:
+            spec = self.get_spec(name)
+            if spec is None:
+                continue
+            schemas.append({
+                "type": "function",
+                "function": {
+                    "name": spec.name,
+                    "description": spec.description or spec.name,
+                    "parameters": spec.input_model.model_json_schema(),
+                },
+            })
+        return schemas
+
+    @contextmanager
+    def trace_calls(self):
+        """Record every call() made in this context: yields a list of
+        {"name", "args"} dicts, appended in call order (including calls
+        that then fail validation)."""
+        calls: list[dict] = []
+        token = _call_trace.set(calls)
+        try:
+            yield calls
+        finally:
+            _call_trace.reset(token)
+
+    def record_blocked_call(self, name: str, args: dict) -> None:
+        """Record a tool the caller chose but refused to execute."""
+        trace = _call_trace.get()
+        if trace is not None:
+            trace.append({"name": name, "args": dict(args), "blocked": True})
+
     async def call(self, name: str, args: dict) -> dict:
         """Look up tool, validate args, run with timeout, validate result, return.
 
@@ -73,6 +113,10 @@ class ToolRegistry:
         Raises ToolExecutionError if the tool raises an exception.
         Raises EgressDeniedError if the tool attempts an unauthorized outbound call.
         """
+        trace = _call_trace.get()
+        if trace is not None:
+            trace.append({"name": name, "args": dict(args)})
+
         entry = self._tools.get(name)
         if not entry:
             raise ToolNotFoundError(f"Unknown tool: {name}")

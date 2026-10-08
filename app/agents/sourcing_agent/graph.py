@@ -42,83 +42,146 @@ MAX_RESEARCH_ATTEMPTS = 3
 
 # ── Node 1: Research (agentic) ──
 
+# Tools offered to the model during research. The side-effect tools are
+# offered on purpose: a good planner must NOT pick them here, and the eval
+# counts it when it does. They are never executed from this node.
+RESEARCH_TOOLS = ["query_suppliers", "get_price_quote", "check_seller_rating",
+                  "create_purchase_order", "initiate_payment"]
+RESEARCH_EXECUTABLE = {"query_suppliers", "get_price_quote", "check_seller_rating"}
+MAX_TOOL_TURNS = 12
 
-async def research_node(state: AgentState) -> dict:
-    """Research node: multi-tool sequence through the registry.
+RESEARCH_SYSTEM_PROMPT = """You are the research step of a procurement agent.
+Goal: find every supplier that sells the requested item within the per-unit
+budget, then gather a price quote AND a seller rating for each of them.
+Use the tools. Do not create purchase orders or payments: ordering happens
+later, after a human approves. When the research is complete (or no
+supplier matches), reply with a one-line summary and no tool calls."""
 
-    Sequence: query_suppliers → get_price_quote (per supplier) → check_seller_rating (per supplier)
 
-    Stop condition:
-    - If suppliers found → enrich with quotes + ratings, status = "completed"
-    - If 3 attempts with no matches → status = "no_matches", return
-    """
-    brief = state["brief"]
-    attempts = state.get("attempts", 0) + 1
-
-    # Step 1: Query suppliers through the registry
-    query_result = await registry.call(
-        "query_suppliers",
+def _enrich(suppliers: list[dict], quotes: dict, ratings: dict) -> list[dict]:
+    return [
         {
-            "item": brief.item,
-            "budget": brief.budget,
-            "quantity": brief.quantity,
-        },
+            "name": s["name"],
+            "item": s["item"],
+            "price": s["price"],
+            "lead_time_days": s["lead_time_days"],
+            "rating": s["rating"],
+            "quote": quotes.get(s["name"], {}),
+            "rating_info": ratings.get(s["name"], {}),
+        }
+        for s in suppliers
+    ]
+
+
+async def _fixed_plan(brief) -> list[dict]:
+    """Hard-coded order: query → quote + rating per supplier. Used when the
+    LLM client has no tool calling (deterministic/CI mode). Tool-selection
+    accuracy under this planner is 100% BY CONSTRUCTION — evals report the
+    planner so that number is never mistaken for a model's."""
+    query_result = await registry.call(
+        "query_suppliers", {"item": brief.item, "budget": brief.budget, "quantity": brief.quantity},
     )
     suppliers = query_result.get("suppliers", [])
+    quotes, ratings = {}, {}
+    for s in suppliers:
+        quotes[s["name"]] = await registry.call(
+            "get_price_quote", {"supplier_name": s["name"], "item": brief.item, "quantity": brief.quantity},
+        )
+        ratings[s["name"]] = await registry.call("check_seller_rating", {"supplier_name": s["name"]})
+    return _enrich(suppliers, quotes, ratings)
 
-    if not suppliers:
+
+async def _llm_plan(brief, client) -> list[dict]:
+    """The model chooses which tools to call, with which arguments, in which
+    order, through native function calling. Every call still goes through
+    the Tool Registry (validation, timeout, egress, output cap)."""
+    import json
+
+    messages = [
+        {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            f"Item: {brief.item}\nQuantity: {brief.quantity}\n"
+            f"Max price per unit: {brief.budget}"
+        )},
+    ]
+    tools = registry.tool_schemas(RESEARCH_TOOLS)
+    suppliers, quotes, ratings = [], {}, {}
+    for _ in range(MAX_TOOL_TURNS):
+        response = await client.complete_with_tools(messages, tools, temperature=0.0)
+        if not response.tool_calls:
+            break
+        messages.append({"role": "assistant", "content": response.content or None, "tool_calls": [
+            {"id": c.id, "type": "function",
+             "function": {"name": c.name, "arguments": json.dumps(c.arguments)}}
+            for c in response.tool_calls
+        ]})
+        for call in response.tool_calls:
+            if call.name not in RESEARCH_EXECUTABLE:
+                # Record the attempt (it is a selection error) but never run it.
+                registry.record_blocked_call(call.name, call.arguments)
+                logger.warning("RESEARCH_TOOL_BLOCKED name=%s — not allowed before approval", call.name)
+                result = {"error": f"{call.name} is not allowed during research"}
+            else:
+                try:
+                    result = await registry.call(call.name, call.arguments)
+                except Exception as e:  # validation / timeout → shown to the model
+                    result = {"error": f"{type(e).__name__}: {e}"}
+            if call.name == "query_suppliers" and "suppliers" in result:
+                suppliers = result["suppliers"]
+            elif call.name == "get_price_quote" and "supplier_name" in result:
+                quotes[result["supplier_name"]] = result
+            elif call.name == "check_seller_rating" and "supplier_name" in result:
+                ratings[result["supplier_name"]] = result
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result)})
+    return _enrich(suppliers, quotes, ratings)
+
+
+async def research_node(state: AgentState) -> dict:
+    """Research node: find suppliers, then a quote + rating for each.
+
+    Planner:
+      - "llm"            (client supports tool calling): the model selects the tools
+      - "fixed"          (deterministic client / CI): the hard-coded sequence
+      - "fixed-fallback" the LLM call failed, so the hard-coded sequence ran
+
+    Stop condition:
+    - If suppliers found → status = "completed"
+    - If 3 attempts with no matches → status = "no_matches"
+    """
+    from app.agentmesh.llm import get_llm_client
+
+    brief = state["brief"]
+    attempts = state.get("attempts", 0) + 1
+    client = get_llm_client()
+    planner = "llm" if getattr(client, "supports_tool_calling", False) else "fixed"
+    if planner == "llm":
+        try:
+            enriched = await _llm_plan(brief, client)
+        except Exception as e:  # provider down / no key: degrade, and say so
+            logger.warning("RESEARCH_LLM_FAILED error=%s — falling back to the fixed plan", e)
+            planner = "fixed-fallback"
+            enriched = await _fixed_plan(brief)
+    else:
+        enriched = await _fixed_plan(brief)
+
+    if not enriched:
         if attempts >= MAX_RESEARCH_ATTEMPTS:
             logger.info(
-                "STOP_CONDITION_FIRED path=no_matches item=%s attempts=%d max_attempts=%d",
-                brief.item,
-                attempts,
-                MAX_RESEARCH_ATTEMPTS,
+                "STOP_CONDITION_FIRED path=no_matches item=%s attempts=%d max_attempts=%d planner=%s",
+                brief.item, attempts, MAX_RESEARCH_ATTEMPTS, planner,
             )
-            return {"suppliers": [], "attempts": attempts, "status": "no_matches"}
+            return {"suppliers": [], "attempts": attempts, "status": "no_matches", "planner": planner}
         logger.info(
             "RESEARCH_RETRY item=%s attempts=%d/%d — no suppliers found, will retry",
-            brief.item,
-            attempts,
-            MAX_RESEARCH_ATTEMPTS,
+            brief.item, attempts, MAX_RESEARCH_ATTEMPTS,
         )
-        return {"suppliers": [], "attempts": attempts, "status": "running"}
-
-    # Step 2: Enrich each supplier with a price quote + seller rating
-    enriched = []
-    for s in suppliers:
-        quote = await registry.call(
-            "get_price_quote",
-            {
-                "supplier_name": s["name"],
-                "item": brief.item,
-                "quantity": brief.quantity,
-            },
-        )
-        rating = await registry.call(
-            "check_seller_rating",
-            {
-                "supplier_name": s["name"],
-            },
-        )
-        enriched.append(
-            {
-                "name": s["name"],
-                "item": s["item"],
-                "price": s["price"],
-                "lead_time_days": s["lead_time_days"],
-                "rating": s["rating"],
-                "quote": quote,
-                "rating_info": rating,
-            }
-        )
+        return {"suppliers": [], "attempts": attempts, "status": "running", "planner": planner}
 
     logger.info(
-        "STOP_CONDITION_FIRED path=completed item=%s attempts=%d suppliers_found=%d",
-        brief.item,
-        attempts,
-        len(enriched),
+        "STOP_CONDITION_FIRED path=completed item=%s attempts=%d suppliers_found=%d planner=%s",
+        brief.item, attempts, len(enriched), planner,
     )
-    return {"suppliers": enriched, "attempts": attempts, "status": "completed"}
+    return {"suppliers": enriched, "attempts": attempts, "status": "completed", "planner": planner}
 
 
 # ── Node 2: Score (deterministic function — NO LLM) ──

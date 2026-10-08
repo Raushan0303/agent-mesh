@@ -38,6 +38,14 @@ class LLMMessage:
 
 
 @dataclass
+class ToolCall:
+    """A tool call requested by the model."""
+    id: str
+    name: str
+    arguments: dict
+
+
+@dataclass
 class LLMResponse:
     """Response from an LLM completion call."""
     content: str
@@ -45,6 +53,7 @@ class LLMResponse:
     usage: dict = field(default_factory=dict)  # {prompt_tokens, completion_tokens, total_tokens}
     cost_usd: float = 0.0  # from InferRoute's response (computed by InferRoute, not AgentMesh)
     raw: dict | None = None  # raw provider response for debugging
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 # ── Provider presets ──
@@ -98,6 +107,22 @@ class LLMClient(ABC):
         OTel context — no explicit trace_id parameter needed.
         """
         ...
+
+    # Whether complete_with_tools() is available (native function calling).
+    supports_tool_calling: bool = False
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        model: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1000,
+    ) -> LLMResponse:
+        """One model turn with function calling. `messages` are OpenAI-format
+        dicts (so assistant tool_calls and tool results can be replayed);
+        the model either returns tool_calls or a final text answer."""
+        raise NotImplementedError
 
 
 # ── OpenAI-compatible implementation ──
@@ -262,6 +287,54 @@ class OpenAICompatibleClient(LLMClient):
             usage=usage,
             cost_usd=cost_usd,
             raw=response,
+        )
+
+
+    supports_tool_calling = True
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        model: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1000,
+    ) -> LLMResponse:
+        import json as _json
+
+        used_model = model or self.default_model
+        response = await self.client.chat.completions.create(
+            model=used_model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_headers=self._inject_traceparent(),
+        )
+        msg = response.choices[0].message
+        calls = []
+        for tc in msg.tool_calls or []:
+            try:
+                args = _json.loads(tc.function.arguments or "{}")
+            except ValueError:
+                args = {"_unparseable": tc.function.arguments}
+            calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+        usage = {}
+        if response.usage:
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+        raw_dict = response.model_dump() if hasattr(response, "model_dump") else {}
+        return LLMResponse(
+            content=msg.content or "",
+            model=used_model,
+            usage=usage,
+            cost_usd=float((raw_dict or {}).get("cost_usd", 0.0) or 0.0),
+            raw=response,
+            tool_calls=calls,
         )
 
 

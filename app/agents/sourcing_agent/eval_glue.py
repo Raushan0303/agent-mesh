@@ -51,41 +51,31 @@ async def invoke_sourcing_agent(input: dict) -> dict:
         "status": "running",
     }
 
-    # Run Research node (with retry loop — the graph normally loops
-    # back to Research if status is still "running")
-    for _ in range(4):  # max 4 attempts (3 retries + 1)
-        research_result = await research_node(state)
-        state.update(research_result)
-        if state["status"] != "running":
-            break
+    from app.agentmesh.tool_registry import registry
 
-    # If no suppliers found, return early
-    if state["status"] == "no_matches":
-        return {
-            "tool_calls": ["query_suppliers"],
-            "status": "no_matches",
-            "decision_rationale": "",
-            "retrieval_results": [],
-        }
+    # Record the tools ACTUALLY called (by the planner, through the
+    # registry) — the eval scores these, not a list assumed from the outcome.
+    with registry.trace_calls() as calls:
+        for _ in range(4):  # the graph loops Research while status == "running"
+            research_result = await research_node(state)
+            state.update(research_result)
+            if state["status"] != "running":
+                break
+        if state["status"] != "no_matches":
+            state.update(score_node(state))
+            state.update(await decide_node(state))
 
-    # Run Score node
-    score_result = score_node(state)
-    state.update(score_result)
-
-    # Run Decide node
-    decide_result = await decide_node(state)
-    state.update(decide_result)
-
-    # Determine which tools were called
-    tool_calls = ["query_suppliers"]
-    if state.get("suppliers"):
-        tool_calls.append("get_price_quote")
-        tool_calls.append("check_seller_rating")
+    tool_calls = []
+    for c in calls:  # distinct tools, in order of first use
+        if c["name"] not in tool_calls:
+            tool_calls.append(c["name"])
 
     return {
         "tool_calls": tool_calls,
-        "status": "completed",
-        "decision_rationale": state.get("decision_reason", ""),
+        "blocked_tool_calls": [c["name"] for c in calls if c.get("blocked")],
+        "planner": state.get("planner", "unknown"),
+        "status": state["status"],
+        "decision_rationale": state.get("decision_reason", "") if state["status"] != "no_matches" else "",
         "retrieval_results": state.get("past_decisions", []),
         "selected_supplier": state.get("selected_supplier", {}),
     }
@@ -101,6 +91,8 @@ async def run_eval_suite() -> EvalScorecard:
 
     results = await harness.run(EVAL_DATASET, invoke_sourcing_agent)
     scorecard = harness.scorecard(results)
+    planners = sorted({r.actual_outcome.get("planner", "unknown") for r in results})
+    blocked = sum(len(r.actual_outcome.get("blocked_tool_calls", [])) for r in results)
 
     # Check CI gate
     passed, failures = harness.check_ci_gate(scorecard)
@@ -111,7 +103,11 @@ async def run_eval_suite() -> EvalScorecard:
     print(f"  Scenarios:          {scorecard.total_scenarios}")
     print(f"  Passed:             {scorecard.passed}/{scorecard.total_scenarios}")
     print(f"  Pass rate:          {scorecard.pass_rate:.2%}")
+    print(f"  Planner:            {', '.join(planners)}"
+          + ("   (fixed = hard-coded tool order: tool accuracy is 100% by construction)"
+             if any(p.startswith("fixed") for p in planners) else ""))
     print(f"  Avg tool accuracy:  {scorecard.avg_tool_accuracy:.2%}")
+    print(f"  Blocked tool calls: {blocked} (side-effect tools chosen during research)")
     print(f"  Completion rate:    {scorecard.completion_rate:.2%}")
     if scorecard.avg_rag_recall is not None:
         print(f"  Avg RAG recall@5:   {scorecard.avg_rag_recall:.2%}")
@@ -126,6 +122,7 @@ async def run_eval_suite() -> EvalScorecard:
     else:
         print(f"\n  CI GATE PASSED ✅")
 
+    scorecard.planner = ",".join(planners)
     return scorecard
 
 
