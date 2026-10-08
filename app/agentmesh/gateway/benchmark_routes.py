@@ -88,6 +88,7 @@ asyncio.run(main())
     semaphore = asyncio.Semaphore(concurrency)
     results = []
     latencies = []
+    spans = []  # (start, end) per completed workflow → measured concurrency
     errors = []
     batch_id = uuid.uuid4().hex[:8]
 
@@ -103,8 +104,10 @@ asyncio.run(main())
                     task_queue=BENCHMARK_TASK_QUEUE,
                 )
                 result = await handle.result()
-                elapsed_ms = (time.monotonic() - start) * 1000
+                end = time.monotonic()
+                elapsed_ms = (end - start) * 1000
                 latencies.append(elapsed_ms)
+                spans.append((start, end))
                 results.append({"id": wf_id, "status": "completed", "ms": round(elapsed_ms, 1)})
             except Exception as e:
                 elapsed_ms = (time.monotonic() - start) * 1000
@@ -133,6 +136,14 @@ asyncio.run(main())
     p99 = latencies[int(len(latencies) * 0.99)] if len(latencies) > 0 else 0
     avg = sum(latencies) / len(latencies) if latencies else 0
 
+    # Measured, not assumed: how many workflows were actually in flight.
+    events = sorted([(a, 1) for a, _ in spans] + [(b, -1) for _, b in spans])
+    cur = peak = 0
+    for _, d in events:
+        cur += d
+        peak = max(peak, cur)
+    avg_in_flight = throughput * avg / 1000  # Little's Law: L = λ·W
+
     return JSONResponse({
         "batch_id": batch_id,
         "total": count,
@@ -143,7 +154,9 @@ asyncio.run(main())
         "p99_ms": round(p99, 1),
         "avg_ms": round(avg, 1),
         "duration_ms": round(overall_ms, 1),
-        "concurrency": concurrency,
+        "concurrency": concurrency,  # client-side cap, not a measurement
+        "measured_peak_in_flight": peak,
+        "measured_avg_in_flight": round(avg_in_flight, 1),
         "sleep_ms": sleep_ms,
         "workers": num_workers,
         "errors": errors[:5],  # first 5 errors if any

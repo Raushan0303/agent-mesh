@@ -1,0 +1,303 @@
+{
+ "run_id": "hold-10000wf-4w-dcc7d7",
+ "mode": "hold",
+ "task_queue": "loadtest-hold-10000wf-4w-dcc7d7",
+ "workers": 4,
+ "workflows": 10000,
+ "client_concurrency_cap": null,
+ "activity_sleep_ms": 100,
+ "hold_s": 120,
+ "machine": {
+  "cpus": 12
+ },
+ "started_at": "2026-10-08T11:55:12",
+ "started": 10000,
+ "start_errors": 0,
+ "errors_sample": [],
+ "start_phase_s": 9.3,
+ "start_rate_per_s": 1079.4,
+ "peak_open_workflows_from_visibility": 10000,
+ "completed": 10000,
+ "visibility_samples": [
+  {
+   "t_s": 9.3,
+   "open": 9990,
+   "completed": 0
+  },
+  {
+   "t_s": 14.3,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 19.4,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 24.4,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 29.5,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 34.6,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 39.6,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 44.7,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 49.7,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 54.7,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 59.7,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 64.7,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 69.8,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 74.8,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 79.9,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 84.9,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 89.9,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 94.9,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 100.0,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 105.1,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 110.1,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 115.1,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 120.2,
+   "open": 10000,
+   "completed": 0
+  },
+  {
+   "t_s": 125.2,
+   "open": 9961,
+   "completed": 39
+  },
+  {
+   "t_s": 130.2,
+   "open": 9873,
+   "completed": 127
+  },
+  {
+   "t_s": 135.3,
+   "open": 9713,
+   "completed": 288
+  },
+  {
+   "t_s": 140.3,
+   "open": 9528,
+   "completed": 473
+  },
+  {
+   "t_s": 145.3,
+   "open": 9401,
+   "completed": 599
+  },
+  {
+   "t_s": 150.3,
+   "open": 9284,
+   "completed": 716
+  },
+  {
+   "t_s": 155.4,
+   "open": 9171,
+   "completed": 829
+  },
+  {
+   "t_s": 160.4,
+   "open": 8953,
+   "completed": 1047
+  },
+  {
+   "t_s": 165.4,
+   "open": 8753,
+   "completed": 1250
+  },
+  {
+   "t_s": 170.6,
+   "open": 8611,
+   "completed": 1389
+  },
+  {
+   "t_s": 175.6,
+   "open": 8586,
+   "completed": 1414
+  },
+  {
+   "t_s": 180.6,
+   "open": 8002,
+   "completed": 1999
+  },
+  {
+   "t_s": 185.7,
+   "open": 7085,
+   "completed": 2915
+  },
+  {
+   "t_s": 190.7,
+   "open": 6282,
+   "completed": 3719
+  },
+  {
+   "t_s": 195.8,
+   "open": 5997,
+   "completed": 4004
+  },
+  {
+   "t_s": 200.8,
+   "open": 5914,
+   "completed": 4087
+  },
+  {
+   "t_s": 205.9,
+   "open": 5256,
+   "completed": 4746
+  },
+  {
+   "t_s": 211.1,
+   "open": 4563,
+   "completed": 5439
+  },
+  {
+   "t_s": 216.1,
+   "open": 3903,
+   "completed": 6102
+  },
+  {
+   "t_s": 221.2,
+   "open": 3538,
+   "completed": 6463
+  },
+  {
+   "t_s": 228.0,
+   "open": 3502,
+   "completed": 6498
+  },
+  {
+   "t_s": 233.1,
+   "open": 2710,
+   "completed": 7293
+  },
+  {
+   "t_s": 238.1,
+   "open": 2050,
+   "completed": 7952
+  },
+  {
+   "t_s": 243.1,
+   "open": 1622,
+   "completed": 8378
+  },
+  {
+   "t_s": 252.5,
+   "open": 1452,
+   "completed": 8548
+  },
+  {
+   "t_s": 257.6,
+   "open": 1051,
+   "completed": 8949
+  },
+  {
+   "t_s": 262.6,
+   "open": 701,
+   "completed": 9304
+  },
+  {
+   "t_s": 267.7,
+   "open": 476,
+   "completed": 9524
+  },
+  {
+   "t_s": 272.7,
+   "open": 317,
+   "completed": 9683
+  },
+  {
+   "t_s": 277.8,
+   "open": 166,
+   "completed": 9836
+  },
+  {
+   "t_s": 282.9,
+   "open": 26,
+   "completed": 9974
+  },
+  {
+   "t_s": 287.9,
+   "open": 4,
+   "completed": 9996
+  },
+  {
+   "t_s": 292.9,
+   "open": 0,
+   "completed": 10000
+  }
+ ]
+}

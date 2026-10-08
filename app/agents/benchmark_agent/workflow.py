@@ -46,3 +46,23 @@ class BenchmarkWorkflow:
             schedule_to_close_timeout=timedelta(seconds=60),
         )
         return result
+
+
+@workflow.defn
+class HoldWorkflow:
+    """Holds a durable timer, then runs the benchmark activity.
+
+    Used to measure how many workflows can be OPEN at the same time: a
+    workflow waiting on a timer (or a human approval) is a row in
+    Temporal's database, not a running coroutine on a worker.
+    """
+
+    @workflow.run
+    async def run(self, data: dict) -> dict:
+        await asyncio.sleep(data.get("hold_s", 60))  # durable timer in workflow code
+        return await workflow.execute_activity(
+            benchmark_activity,
+            args=(data.get("sleep_ms", 100), data.get("payload_size", 100)),
+            start_to_close_timeout=timedelta(seconds=30),
+            schedule_to_close_timeout=timedelta(minutes=30),
+        )

@@ -1,0 +1,43 @@
+{
+ "run_id": "hold-100wf-2w-794306",
+ "mode": "hold",
+ "task_queue": "loadtest-hold-100wf-2w-794306",
+ "workers": 2,
+ "workflows": 100,
+ "client_concurrency_cap": null,
+ "activity_sleep_ms": 100,
+ "hold_s": 10,
+ "machine": {
+  "cpus": 12
+ },
+ "started_at": "2026-10-08T11:54:50",
+ "started": 100,
+ "start_errors": 0,
+ "errors_sample": [],
+ "start_phase_s": 0.1,
+ "start_rate_per_s": 794.8,
+ "peak_open_workflows_from_visibility": 100,
+ "completed": 100,
+ "visibility_samples": [
+  {
+   "t_s": 0.2,
+   "open": 99,
+   "completed": 0
+  },
+  {
+   "t_s": 5.2,
+   "open": 100,
+   "completed": 0
+  },
+  {
+   "t_s": 10.2,
+   "open": 100,
+   "completed": 0
+  },
+  {
+   "t_s": 15.2,
+   "open": 0,
+   "completed": 100
+  }
+ ]
+}
