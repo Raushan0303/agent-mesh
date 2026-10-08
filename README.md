@@ -1,6 +1,6 @@
 # AgentMesh
 
-**A durable agent execution platform that combines Temporal (crash-safe workflows) with LangGraph (agent reasoning graphs) and a custom MCP tool-calling framework — built to prove that production AI agents need real infrastructure, not just prompt engineering.**
+**A durable agent execution platform that combines Temporal (crash-safe workflows) with LangGraph (agent reasoning graphs) and a Tool Registry served over real MCP (JSON-RPC `tools/list` / `tools/call`) — built to prove that production AI agents need real infrastructure, not just prompt engineering.**
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
 ![Temporal](https://img.shields.io/badge/Temporal-1.24-purple.svg)
@@ -382,9 +382,9 @@ agent-mesh/
 │   └── agents/
 │       ├── sourcing_agent/
 │       │   ├── test_graph.py              #     Stop condition tests (success + no-match paths)
-│       │   └── test_tool_selection_eval.py #    50-scenario eval: 100% tool-selection accuracy
+│       │   └── test_tool_selection_eval.py #    50-scenario eval (fixed planner: 100% by construction)
 │       └── hiring_agent/
-│           └── test_tool_selection_eval.py #    20-scenario eval: 100% tool-selection accuracy
+│           └── test_tool_selection_eval.py #    20-scenario eval
 │
 └── scripts/
     ├── hello_workflow.py                  #   Throwaway smoke test (Phase 0)
@@ -618,7 +618,7 @@ The versioning test shows 4 Activities completed (research → score → create_
 - 5 sourcing tools registered: `query_suppliers`, `get_price_quote`, `check_seller_rating`, `create_purchase_order`, `initiate_payment`
 - Multi-tool sequence in Research node: query → quote → rating (all through the registry)
 - **Eval Harness** (`agentmesh/evals/`) — agent-agnostic, scores tool-selection accuracy
-- 20-scenario eval dataset: **100% tool-selection accuracy**
+- 20-scenario eval dataset. Note: with the deterministic client the research node used a hard-coded tool order, so 100% tool accuracy was by construction; tool selection is now done by the model when the LLM client supports function calling (`research_node`, planner="llm")
 - 9 fault-injection tests: timeout, schema validation, error wrapping, duplicate registration
 - **E2E latency: p50 = 0.32s** (unchanged — the registry adds <1ms overhead)
 
@@ -662,7 +662,7 @@ The versioning test shows 4 Activities completed (research → score → create_
 - **Feedback loop** — thumbs up/down capture, weekly drift report comparing eval scores and acceptance rate
 - **Locust load test** — 500 concurrent sourcing briefs, p50/p95/p99 latency
 - **Full regression pack** — re-runs all Week 3-6 chaos tests as one nightly suite
-- **CI gate: 100% tool accuracy, 100% completion rate, 100% judge score — PASSED**
+- **CI gate PASSED** (deterministic/fixed planner — tool accuracy there is by construction; the scorecard prints the planner)
 
 ### What's next
 
@@ -693,7 +693,7 @@ All 6 weeks complete. The platform is demo-able and CI-gated.
 | `test_score_determinism` | Score node is deterministic | PASSED |
 | `test_regression_pack_smoke` | All Week 3-6 test modules importable | PASSED |
 | `test_research_*` (3 tests) | Graph Research node: finds suppliers, no-match halts, HDMI works | PASSED |
-| `test_tool_selection_eval` | 50 scenarios → 100% tool-selection accuracy | PASSED |
+| `test_tool_selection_eval` | 50 scenarios, fixed planner (100% by construction) | PASSED |
 
 ### CI-gated eval scorecard
 
@@ -764,7 +764,7 @@ Base URL: `http://localhost:8000`
 
 **Replay** — Temporal's crash recovery mechanism. When a Worker picks up a Workflow after a crash, it replays the Event History through the Workflow code to reconstruct the state. This is why Workflow code must be deterministic.
 
-**MCP (Model Context Protocol)** — A protocol for connecting AI models to external tools and data sources. AgentMesh uses MCP concepts (tool registration, schema-based invocation) in its Tool Registry.
+**MCP (Model Context Protocol)** — A protocol for connecting AI models to external tools and data sources. AgentMesh's Tool Registry is an MCP server (`app/agentmesh/mcp_server.py`, official `mcp` SDK): `POST /mcp` (Streamable HTTP) or `python -m app.agentmesh.mcp_server` (stdio). `tools/list` returns JSON Schemas from the Pydantic models; `tools/call` runs through the registry's 5 checks. Only read-only tools are exposed.
 
 **Idempotency Key** — A unique string that identifies a specific side-effecting operation. If the same key is seen twice (e.g., from a retry), the operation is not repeated. Derived from `workflow_id + step_name` in AgentMesh.
 
