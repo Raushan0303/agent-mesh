@@ -51,3 +51,5 @@ class ToolSpec:
     max_output_bytes: int = 65536
     risk_tier: RiskTier = RiskTier.READ_ONLY
     authorization_mode: AuthorizationMode = AuthorizationMode.AUTOMATIC
+    # Shown to LLMs (tool selection) and MCP clients (tools/list).
+    description: str = ""

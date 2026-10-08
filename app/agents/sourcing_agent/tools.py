@@ -236,6 +236,7 @@ def register_sourcing_tools() -> None:
     registry.register(
         ToolSpec(
             name="query_suppliers",
+            description="Search the marketplace for suppliers selling an item at or below a per-unit budget. Returns matching suppliers with price, lead time and rating.",
             input_model=QuerySuppliersInput,
             output_model=QuerySuppliersOutput,
             timeout_seconds=10.0,
@@ -247,6 +248,7 @@ def register_sourcing_tools() -> None:
     registry.register(
         ToolSpec(
             name="get_price_quote",
+            description="Get a binding price quote (unit price, total price, lead time, stock) from ONE named supplier for an item and quantity.",
             input_model=GetPriceQuoteInput,
             output_model=GetPriceQuoteOutput,
             timeout_seconds=10.0,
@@ -258,6 +260,7 @@ def register_sourcing_tools() -> None:
     registry.register(
         ToolSpec(
             name="check_seller_rating",
+            description="Look up a named supplier's track record: rating, total orders and on-time delivery rate.",
             input_model=CheckSellerRatingInput,
             output_model=CheckSellerRatingOutput,
             timeout_seconds=10.0,
@@ -269,6 +272,7 @@ def register_sourcing_tools() -> None:
     registry.register(
         ToolSpec(
             name="create_purchase_order",
+            description="Create a purchase order with a supplier. SIDE EFFECT: commits the company to buy. Only after human approval.",
             input_model=CreatePurchaseOrderInput,
             output_model=CreatePurchaseOrderOutput,
             timeout_seconds=15.0,
@@ -280,6 +284,7 @@ def register_sourcing_tools() -> None:
     registry.register(
         ToolSpec(
             name="initiate_payment",
+            description="Pay a purchase order. IRREVERSIBLE: moves money. Only after human approval and a created PO.",
             input_model=InitiatePaymentInput,
             output_model=InitiatePaymentOutput,
             timeout_seconds=15.0,
